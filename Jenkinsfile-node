@@ -4,14 +4,17 @@ library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
     credentialsId: 'git-agiletester'
 ])
 
+def nodeImage = selectAgent('node') // Shared library call
+
 pipeline {
     agent {
         docker {
-            image selectAgent('node')
+            image "${nodeImage}"
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
     environment {
-        DOCKERHUB_REPO = 'agileqa/node-frontend'
+        DOCKERHUB_REPO = 'agileqa/node-sample'
         IMAGE_TAG = 'latest'
     }
     stages {
@@ -34,12 +37,10 @@ pipeline {
         }
         stage('Deploy Locally') {
             steps {
-                script {
-                    sh """
-                        docker rm -f node_frontend_container || true
-                        docker run -d --name node_frontend_container -p 8081:80 ${DOCKERHUB_REPO}:${IMAGE_TAG}
-                    """
-                }
+                sh """
+                    docker rm -f node_sample_container || true
+                    docker run -d --name node_sample_container -p 3000:3000 ${DOCKERHUB_REPO}:${IMAGE_TAG}
+                """
             }
         }
     }

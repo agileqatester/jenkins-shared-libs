@@ -4,10 +4,13 @@ library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
     credentialsId: 'git-agiletester'
 ])
 
+def dotnetImage = selectAgent('dotnet') // Shared library call
+
 pipeline {
     agent {
         docker {
-            image selectAgent('dotnet')
+            image "${dotnetImage}" // Use the result as a string
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
     environment {
@@ -34,12 +37,10 @@ pipeline {
         }
         stage('Deploy Locally') {
             steps {
-                script {
-                    sh """
-                        docker rm -f dotnet_sample_container || true
-                        docker run -d --name dotnet_sample_container -p 8080:80 ${DOCKERHUB_REPO}:${IMAGE_TAG}
-                    """
-                }
+                sh """
+                    docker rm -f dotnet_sample_container || true
+                    docker run -d --name dotnet_sample_container -p 8080:80 ${DOCKERHUB_REPO}:${IMAGE_TAG}
+                """
             }
         }
     }
