@@ -1,0 +1,8 @@
+
+*.log
+*.tmp
+*.bak
+target/
+node_modules/
+bin/
+obj/
