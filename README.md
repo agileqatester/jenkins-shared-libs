@@ -1,16 +1,16 @@
 # Jenkins Shared Library
 
-This repository contains reusable Jenkins pipeline code.
+This shared library provides reusable pipeline functions for building projects using Node.js, Java (Maven), Gradle, and .NET.
 
 ## Structure
 
-- `vars/`: Simple steps callable directly in Jenkinsfiles
-- `src/`: Groovy classes for advanced logic
+- `vars/selectAgent.groovy`: Returns appropriate Docker image based on project type.
+- `vars/runBuild.groovy`: Executes build commands based on project type.
+- `Jenkinsfile`: Example usage of the shared library.
 
-## Usage
+## Supported Project Types
 
-In your Jenkinsfile:
-
-```groovy
-@Library('jenkins-shared-library') _
-sayHello('Dimitry')
+- `node`
+- `java`
+- `gradle`
+- `dotnet`
