@@ -1,0 +1,12 @@
+@Library('jenkins-shared-library') _
+import org.example.Utils
+
+node {
+    stage('Greet') {
+        sayHello('Scripted Dimitry')
+    }
+    stage('Shout') {
+        def msg = Utils.shout("hello from scripted")
+        echo msg
+    }
+}
