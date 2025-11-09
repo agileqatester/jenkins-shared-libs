@@ -1,0 +1,46 @@
+library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
+    $class: 'GitSCMSource',
+    remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
+    credentialsId: 'git-agiletester'
+])
+
+pipeline {
+    agent {
+        docker {
+            image selectAgent('dotnet')
+        }
+    }
+    environment {
+        DOCKERHUB_REPO = 'agileqa/dotnet-sample'
+        IMAGE_TAG = 'latest'
+    }
+    stages {
+        stage('Build') {
+            steps {
+                dir('examples/dotnet-app') {
+                    runBuild('dotnet')
+                }
+            }
+        }
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
+                        def app = docker.build("${DOCKERHUB_REPO}:${IMAGE_TAG}")
+                        app.push()
+                    }
+                }
+            }
+        }
+        stage('Deploy Locally') {
+            steps {
+                script {
+                    sh """
+                        docker rm -f dotnet_sample_container || true
+                        docker run -d --name dotnet_sample_container -p 8080:80 ${DOCKERHUB_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+    }
+}
