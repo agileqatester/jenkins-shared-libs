@@ -160,10 +160,10 @@ node {
 
                             # Compose proxy build args (only pass what exists)
                             proxyArgs=""
-                            [ -n "${http_proxy:-}" ]  && proxyArgs="$proxyArgs --build-arg http_proxy=$http_proxy"
+                            [ -n "${http_proxy:-}"  ] && proxyArgs="$proxyArgs --build-arg http_proxy=$http_proxy"
                             [ -n "${https_proxy:-}" ] && proxyArgs="$proxyArgs --build-arg https_proxy=$https_proxy"
                             [ -n "${no_proxy:-}" ]    && proxyArgs="$proxyArgs --build-arg no_proxy=$no_proxy"
-                            [ -n "${HTTP_PROXY:-}" ]  && proxyArgs="$proxyArgs --build-arg HTTP_PROXY=$HTTP_PROXY"
+                            [ -n "${HTTP_PROXY:-}"  ] && proxyArgs="$proxyArgs --build-arg HTTP_PROXY=$HTTP_PROXY"
                             [ -n "${HTTPS_PROXY:-}" ] && proxyArgs="$proxyArgs --build-arg HTTPS_PROXY=$HTTPS_PROXY"
                             [ -n "${NO_PROXY:-}" ]    && proxyArgs="$proxyArgs --build-arg NO_PROXY=$NO_PROXY"
 
