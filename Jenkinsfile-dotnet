@@ -27,6 +27,25 @@ node {
                 echo "Using build image: ${buildImage}"
             }
 
+
+            stage('Preflight') {
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh '''
+                    set -eux
+                    echo "=== Preflight checks ==="
+                    whoami
+                    id
+                    ls -l /var/run/docker.sock
+                    which docker
+                    docker version
+                    dotnet --info
+                    echo "Workspace: $PWD"
+                    test -d examples/dotnet-app
+                    test -f examples/dotnet-app/Dockerfile
+                    '''
+                }
+            }
+
             stage('Build (.NET)') {
                 docker.image(buildImage).inside(dockerArgs) {
                     dir(buildCtx) {
@@ -61,10 +80,13 @@ node {
             currentBuild.result = 'FAILURE'
             echo "Pipeline failed: ${err}"
             throw err
-        } finally {
-            stage('Cleanup') {
-                sh 'docker image ls | head -n 20 || true'
+        } 
+        finally {
+        stage('Cleanup') {
+            docker.image(buildImage).inside(dockerArgs) {
+            sh 'docker image ls | head -n 20 || true'
             }
+        }
         }
     }
 }
