@@ -28,22 +28,18 @@ node {
             }
 
             stage('Build (.NET)') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    dir(buildCtx) {
-                        runBuild('dotnet')
-                    }
+                dir(buildCtx) {
+                    runBuild('dotnet')
                 }
             }
 
             stage('Docker Build & Push') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                        def app = docker.build("${repo}:${tag}", buildCtx)
-                        app.push()
-                        if (tag != 'latest') {
-                            sh "docker tag ${repo}:${tag} ${repo}:latest"
-                            sh "docker push ${repo}:latest"
-                        }
+                docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
+                    def app = docker.build("${repo}:${tag}", buildCtx)
+                    app.push()
+                    if (tag != 'latest') {
+                        sh "docker tag ${repo}:${tag} ${repo}:latest"
+                        sh "docker push ${repo}:latest"
                     }
                 }
             }
