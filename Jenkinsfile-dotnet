@@ -198,7 +198,11 @@ node {
             }
             
             stage('Deploy Locally') {
-                withEnv(["REPO=${repo}", "TAG=${tag}"]) {
+                // If you already have repo/tag vars above, keep them. Otherwise set explicitly:
+                withEnv([
+                "REPO=agileqa/dotnet-sample",
+                "TAG=latest"
+                ]) {
 
                 docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
                     sh '''#!/usr/bin/env bash
@@ -208,21 +212,41 @@ node {
             id
             ls -l /var/run/docker.sock || true
 
+            echo "==> Using image: ${REPO}:${TAG}"
+            echo "==> Image ID:"
+            docker image inspect "${REPO}:${TAG}" --format '{{.Id}}' || { echo "ERROR: image not found: ${REPO}:${TAG}"; exit 1; }
+
+            echo "==> Image ExposedPorts:"
+            EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}' || true)
+            echo "${EXPOSED}"
+            if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
+            echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp. Rebuild the image with EXPOSE 80 (and ASPNETCORE_URLS=http://+:80)." >&2
+            exit 1
+            fi
+
             echo "==> Cleaning previous container if any"
             docker rm -f dotnet_sample_container || true
 
             echo "==> Starting app container and publishing EXPOSEd ports (-P)"
-            cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
+            cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}") || {
+            echo "ERROR: docker run failed"; exit 1;
+            }
 
-            # Tiny delay so mapping registers
+            # Tiny delay to let mapping register
             sleep 1
 
-            echo "==> Discovering mapped host port for 80/tcp"
-            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
-            if [[ -z "${mapped:-}" ]]; then
-            echo "Failed to detect mapped port for 80/tcp"
-            echo "==> Diagnostics"
+            echo "==> docker ps:"
             docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+
+            echo "==> NetworkSettings.Ports:"
+            docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
+
+            echo "==> Discovering mapped host port for 80/tcp"
+            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}' || true)
+
+            if [[ -z "${mapped:-}" ]]; then
+            echo "ERROR: No public port for 80/tcp."
+            echo "Diagnostics:"
             docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
             docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
             docker logs dotnet_sample_container || true
@@ -231,7 +255,7 @@ node {
 
             echo "Container ${cid} is mapped to host port: ${mapped}"
 
-            # Inside the build container, use host.docker.internal to reach the host port
+            # Inside the build container, hit via host.docker.internal
             APP_URL="http://host.docker.internal:${mapped}"
             echo "APP_URL=${APP_URL}" | tee app_url.properties
 
