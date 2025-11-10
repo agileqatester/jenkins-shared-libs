@@ -197,27 +197,33 @@ node {
                 }
             }
             
-            stage('Deploy Locally') {
-                // Choose a strategy: fixed 8080 or random port. Here: fixed 8080.
-                withEnv(["REPO=${repo}", "TAG=${tag}"]) {
-                    docker.image(buildImage).inside(dockerArgs) {
-                        sh '''#!/usr/bin/env bash
-            set -Eeuo pipefail
+        stage('Deploy Locally') {
+            // Pass repo/tag as envs so shell sees them reliably with 'set -u'
+            withEnv(["REPO=${repo}", "TAG=${tag}"]) {
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh '''#!/usr/bin/env bash
+        set -Eeuo pipefail
 
-            docker rm -f dotnet_sample_container || true
+        # Remove our app's container if it exists
+        docker rm -f dotnet_sample_container || true
 
-            # If any container uses 8080 already, stop it to avoid collisions
-            conflicting=$(docker ps --quiet --filter "publish=8080")
-            if [[ -n "${conflicting}" ]]; then
-            docker rm -f ${conflicting}
-            fi
+        # Start container, publish exposed ports to random high ports
+        cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
 
-            docker run -d --name dotnet_sample_container -p 8080:80 "${REPO}:${TAG}"
-            echo "App should be reachable at http://localhost:8080/"
-            '''
-                    }
+        # Find the mapped host port for the container's 80/tcp
+        mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
+        if [[ -z "${mapped}" ]]; then
+        echo "Failed to detect mapped port for 80/tcp"; docker logs dotnet_sample_container || true; exit 1
+        fi
+
+        echo "Container ${cid} is mapped to host port: ${mapped}"
+        echo "APP_URL=http://localhost:${mapped}" | tee app_url.properties
+        '''
+                    // Optionally archive the URL for visibility:
+                    archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
             }
+        }
 
         } catch (err) {
             currentBuild.result = 'FAILURE'
