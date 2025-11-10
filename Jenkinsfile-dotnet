@@ -200,7 +200,6 @@ node {
             stage('Deploy Locally') {
                 withEnv(["REPO=${repo}", "TAG=${tag}"]) {
 
-                // Inline .inside() args to avoid 'def' entirely
                 docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
                     sh '''#!/usr/bin/env bash
             set -Eeuo pipefail
@@ -212,25 +211,27 @@ node {
             echo "==> Cleaning previous container if any"
             docker rm -f dotnet_sample_container || true
 
-            echo "==> Starting app container and publishing container 80 to a RANDOM host port"
-            cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
+            echo "==> Starting app container and publishing EXPOSEd ports (-P)"
+            cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
 
-            # Tiny delay so port mapping is registered
+            # Tiny delay so mapping registers
             sleep 1
 
             echo "==> Discovering mapped host port for 80/tcp"
             mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
             if [[ -z "${mapped:-}" ]]; then
             echo "Failed to detect mapped port for 80/tcp"
-            docker ps -a
-            docker inspect dotnet_sample_container || true
+            echo "==> Diagnostics"
+            docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+            docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
+            docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
             docker logs dotnet_sample_container || true
             exit 1
             fi
 
             echo "Container ${cid} is mapped to host port: ${mapped}"
 
-            # We are inside the build container; use host.docker.internal (host-gateway alias)
+            # Inside the build container, use host.docker.internal to reach the host port
             APP_URL="http://host.docker.internal:${mapped}"
             echo "APP_URL=${APP_URL}" | tee app_url.properties
 
@@ -250,7 +251,6 @@ node {
             '''
                 }
 
-                // Archive after inside{} so Jenkins can grab it from the workspace
                 archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
             }
