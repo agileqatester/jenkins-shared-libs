@@ -200,14 +200,8 @@ node {
             stage('Deploy Locally') {
                 withEnv(["REPO=${repo}", "TAG=${tag}"]) {
 
-                // Give the build container access to host Docker:
-                //  - Mount docker.sock
-                //  - Add the docker socket group GID (991) so non-root can use it
-                //  - Add host-gateway alias to reach published host ports from inside
-                def dockerArgs = '--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock ' +
-                                '--add-host=host.docker.internal:host-gateway'
-
-                docker.image(buildImage).inside(dockerArgs) {
+                // Inline .inside() args to avoid 'def' entirely
+                docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
                     sh '''#!/usr/bin/env bash
             set -Eeuo pipefail
 
@@ -256,7 +250,7 @@ node {
             '''
                 }
 
-                // Archive after inside{} so Jenkins can pick the file from workspace
+                // Archive after inside{} so Jenkins can grab it from the workspace
                 archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
             }
