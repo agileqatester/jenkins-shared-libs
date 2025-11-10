@@ -197,16 +197,28 @@ node {
                 }
             }
             
-        stage('Deploy Locally') {
-            docker.image(buildImage).inside(dockerArgs) {
-                sh '''
-                set -eux
-                docker rm -f dotnet_sample_container || true
-                docker run -d --name dotnet_sample_container -p 8081:80 "${repo}:${tag}"
-                echo "App is (likely) reachable on http://localhost:8081/"
-                '''
+            stage('Deploy Locally') {
+                // Choose a strategy: fixed 8080 or random port. Here: fixed 8080.
+                withEnv(["REPO=${repo}", "TAG=${tag}"]) {
+                    docker.image(buildImage).inside(dockerArgs) {
+                        sh '''#!/usr/bin/env bash
+            set -Eeuo pipefail
+
+            docker rm -f dotnet_sample_container || true
+
+            # If any container uses 8080 already, stop it to avoid collisions
+            conflicting=$(docker ps --quiet --filter "publish=8080")
+            if [[ -n "${conflicting}" ]]; then
+            docker rm -f ${conflicting}
+            fi
+
+            docker run -d --name dotnet_sample_container -p 8080:80 "${REPO}:${TAG}"
+            echo "App should be reachable at http://localhost:8080/"
+            '''
+                    }
+                }
             }
-        }
+
         } catch (err) {
             currentBuild.result = 'FAILURE'
             echo "Pipeline failed: ${err}"
