@@ -197,16 +197,16 @@ node {
                 }
             }
             
-            stage('Deploy Locally') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    sh """
-                      set -eux
-                      docker rm -f dotnet_sample_container || true
-                      # If app is console-only, remove the -p mapping; if ASP.NET on port 80, keep it:
-                      docker run -d --name dotnet_sample_container -p 8080:80 "${repo}:${tag}"
-                    """
-                }
+        stage('Deploy Locally') {
+            docker.image(buildImage).inside(dockerArgs) {
+                sh '''
+                set -eux
+                docker rm -f dotnet_sample_container || true
+                docker run -d --name dotnet_sample_container -p 8081:80 "${repo}:${tag}"
+                echo "App is (likely) reachable on http://localhost:8081/"
+                '''
             }
+        }
         } catch (err) {
             currentBuild.result = 'FAILURE'
             echo "Pipeline failed: ${err}"
