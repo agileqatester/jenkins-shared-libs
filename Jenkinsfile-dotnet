@@ -197,33 +197,39 @@ node {
                 }
             }
             
-        stage('Deploy Locally') {
-            // Pass repo/tag as envs so shell sees them reliably with 'set -u'
+            stage('Deploy Locally') {
             withEnv(["REPO=${repo}", "TAG=${tag}"]) {
+                // Ensure your .inside() can reach the host via host.docker.internal
+                def dockerArgs = '--add-host=host.docker.internal:host-gateway -v /var/run/docker.sock:/var/run/docker.sock'
+
                 docker.image(buildImage).inside(dockerArgs) {
-                    sh '''#!/usr/bin/env bash
-        set -Eeuo pipefail
+                sh '''#!/usr/bin/env bash
+            set -Eeuo pipefail
 
-        # Remove our app's container if it exists
-        docker rm -f dotnet_sample_container || true
+            docker rm -f dotnet_sample_container || true
 
-        # Start container, publish exposed ports to random high ports
-        cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
+            # App listens on 8080 in-container by default; map to a RANDOM host port
+            cid=$(docker run -d --name dotnet_sample_container -p 0:8080 "${REPO}:${TAG}")
 
-        # Find the mapped host port for the container's 80/tcp
-        mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
-        if [[ -z "${mapped}" ]]; then
-        echo "Failed to detect mapped port for 80/tcp"; docker logs dotnet_sample_container || true; exit 1
-        fi
+            # Read back the mapped host port for 8080/tcp
+            mapped=$(docker port dotnet_sample_container 8080/tcp | awk -F: '{print $NF}')
+            if [[ -z "${mapped:-}" ]]; then
+            echo "Failed to detect mapped port for 8080/tcp"
+            docker ps -a
+            docker inspect dotnet_sample_container || true
+            docker logs dotnet_sample_container || true
+            exit 1
+            fi
 
-        echo "Container ${cid} is mapped to host port: ${mapped}"
-        echo "APP_URL=http://localhost:${mapped}" | tee app_url.properties
-        '''
-                    // Optionally archive the URL for visibility:
-                    archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
+            echo "Container ${cid} is mapped to host port: ${mapped}"
+
+            # If you curl from inside this .inside() container, use host.docker.internal
+            echo "APP_URL=http://host.docker.internal:${mapped}" | tee app_url.properties
+            '''
+                archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
             }
-        }
+            }
 
         } catch (err) {
             currentBuild.result = 'FAILURE'
