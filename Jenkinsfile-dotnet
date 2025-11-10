@@ -144,43 +144,59 @@ node {
 
             stage('Docker Build & Push (App)') {
                 // Enable/disable BuildKit via parameter; optionally switch to buildx path
-                def bk = params.USE_BUILDKIT ? '1' : '0'
-                def useBuildx = params.USE_BUILDX
+                def bk = (params?.USE_BUILDKIT == null || params.USE_BUILDKIT) ? '1' : '0'
+                def useBuildx = (params?.USE_BUILDX == true)
 
                 withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=${bk}"]) {
                     docker.image(buildImage).inside(dockerArgs) {
                         withCredentials([usernamePassword(credentialsId: 'docker-hub-agileqa',
-                                                          usernameVariable: 'DOCKER_USER',
-                                                          passwordVariable: 'DOCKER_PASS')]) {
+                                                        usernameVariable: 'DOCKER_USER',
+                                                        passwordVariable: 'DOCKER_PASS')]) {
                             sh """
-                              set -eux
-                              echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+                            set -eux
 
-                              if [ "${useBuildx}" = "true" ]; then
+                            # Login (secure)
+                            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+
+                            # Compose proxy build args (only pass what exists)
+                            proxyArgs=""
+                            [ -n "${http_proxy:-}" ]  && proxyArgs="$proxyArgs --build-arg http_proxy=$http_proxy"
+                            [ -n "${https_proxy:-}" ] && proxyArgs="$proxyArgs --build-arg https_proxy=$https_proxy"
+                            [ -n "${no_proxy:-}" ]    && proxyArgs="$proxyArgs --build-arg no_proxy=$no_proxy"
+                            [ -n "${HTTP_PROXY:-}" ]  && proxyArgs="$proxyArgs --build-arg HTTP_PROXY=$HTTP_PROXY"
+                            [ -n "${HTTPS_PROXY:-}" ] && proxyArgs="$proxyArgs --build-arg HTTPS_PROXY=$HTTPS_PROXY"
+                            [ -n "${NO_PROXY:-}" ]    && proxyArgs="$proxyArgs --build-arg NO_PROXY=$NO_PROXY"
+
+                            if [ "${useBuildx}" = "true" ]; then
                                 # Ensure a builder exists and is active
                                 docker buildx create --use --name jxbuilder || true
                                 docker buildx inspect --bootstrap
-                                # Build and load into the local Docker engine so 'Deploy Locally' works
-                                docker buildx build --progress=plain --load \\
-                                  -t ${repo}:${tag} \\
-                                  -f ${dockerfile} ${buildCtx}
-                              else
-                                # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
-                                docker build --progress=plain -t ${repo}:${tag} -f ${dockerfile} ${buildCtx}
-                              fi
 
-                              docker push ${repo}:${tag}
-                              if [ "${tag}" != "latest" ]; then
+                                # Build with Buildx and LOAD into the local engine (needed for Deploy Locally)
+                                docker buildx build --progress=plain --load $proxyArgs \
+                                -t ${repo}:${tag} \
+                                -f ${dockerfile} ${buildCtx}
+                            else
+                                # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
+                                docker build --progress=plain $proxyArgs \
+                                -t ${repo}:${tag} \
+                                -f ${dockerfile} ${buildCtx}
+                            fi
+
+                            # Push tags
+                            docker push ${repo}:${tag}
+                            if [ "${tag}" != "latest" ]; then
                                 docker tag ${repo}:${tag} ${repo}:latest
                                 docker push ${repo}:latest
-                              fi
-                              docker logout || true
+                            fi
+
+                            docker logout || true
                             """
                         }
                     }
                 }
             }
-
+            
             stage('Deploy Locally') {
                 docker.image(buildImage).inside(dockerArgs) {
                     sh """
