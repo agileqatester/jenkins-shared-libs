@@ -1,19 +1,21 @@
 node {
-    def repo       = 'agileqa/dotnet-sample'
+    def repo       = 'agileqa/dotnet-sample'                  // Docker Hub repo for the APP image
     def tag        = env.IMAGE_TAG ?: 'latest'
-    def projDir    = 'examples/dotnet-app'
-    def dockerfile = 'examples/dotnet-app/Dockerfile'
-    def buildCtx   = '.'
-    def buildImage = 'agileqa/jenkins-agent:multi-tool'
 
-    // Workspace-based NuGet cache on host
+    def projDir    = 'examples/dotnet-app'                    // .NET project path (csproj lives here)
+    def dockerfile = 'examples/dotnet-app/Dockerfile'         // APP Dockerfile path
+    def buildCtx   = '.'                                      // Context '.' so Dockerfile can COPY from anywhere in repo
+
+    def buildImage = 'agileqa/jenkins-agent:multi-tool'       // Your agent image
+
+    // Host-side NuGet cache under workspace; mounted into the inner container for speed
     def nugetCacheHost = "${env.WORKSPACE}/.nuget/packages"
     sh "mkdir -p '${nugetCacheHost}' || true"
 
-    // IMPORTANT: socket + group; mount cache to /home/jenkins/.nuget/packages
+    // Mount Docker socket + NuGet cache; and keep docker group for socket permissions (GID 991 on your host)
     def dockerArgs = "-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${nugetCacheHost}:/home/jenkins/.nuget/packages"
 
-    // Common .NET env for inner container
+    // .NET environment so first-time use doesn't write under /
     def dotnetEnv = [
         "HOME=/home/jenkins",
         "DOTNET_CLI_HOME=/home/jenkins",
@@ -24,8 +26,12 @@ node {
 
     timestamps {
         try {
-            stage('Checkout') { checkout scm }
+            stage('Checkout') {
+                checkout scm
+                sh 'git rev-parse --short HEAD || true'
+            }
 
+            // If your library is public, you can omit credentialsId
             stage('Load Shared Library') {
                 library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
                     $class: 'GitSCMSource',
@@ -44,20 +50,18 @@ node {
                     docker.image(buildImage).inside(dockerArgs) {
                         sh """
                           set -eux
-                          whoami; id
+                          whoami || true; id || true
                           echo HOME=\$HOME
-                          ls -ld /home/jenkins || true
-                          ls -ld /home/jenkins/.nuget || mkdir -p /home/jenkins/.nuget && ls -ld /home/jenkins/.nuget
-                          ls -ld /home/jenkins/.nuget/packages || mkdir -p /home/jenkins/.nuget/packages
                           ls -l /var/run/docker.sock
                           which docker; docker version
-                          dotnet --info
+                          dotnet --info || true
                           dotnet --list-sdks || true
 
                           echo '== PWD =='; pwd
-                          echo '== Project dir =='; ls -la ${projDir}
+                          echo '== Top-level =='; ls -la
+                          echo '== Project dir =='; ls -la ${projDir} || true
                           echo '== App Dockerfile =='; test -f ${dockerfile}
-                          echo '=== Preflight OK ==='
+                          test -d ${projDir}
                         """
                     }
                 }
@@ -77,8 +81,8 @@ node {
                 }
             }
 
-            stage('Docker Build & Push') {
-                withEnv(dotnetEnv) { // harmless but keeps env consistent
+            stage('Docker Build & Push (App)') {
+                withEnv(dotnetEnv) {
                     docker.image(buildImage).inside(dockerArgs) {
                         docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
                             def app = docker.build("${repo}:${tag}", "-f ${dockerfile} ${buildCtx}")
@@ -96,6 +100,7 @@ node {
                     sh """
                       set -eux
                       docker rm -f dotnet_sample_container || true
+                      # If your app is web listening on 80, this mapping works; otherwise adjust
                       docker run -d --name dotnet_sample_container -p 8080:80 "${repo}:${tag}"
                     """
                 }

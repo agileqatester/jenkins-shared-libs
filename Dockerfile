@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1.7
 FROM mcr.microsoft.com/dotnet/sdk:8.0
 
+# --- IDs (adjust DOCKER_GID if your host's /var/run/docker.sock group differs) ---
+ARG JENKINS_UID=1000
+ARG JENKINS_GID=1000
 ARG DOCKER_GID=991
+
 USER root
 
 # Base tooling
@@ -36,7 +40,7 @@ RUN --mount=type=secret,id=http_proxy \
     apt-get install -y --no-install-recommends docker-ce-cli; \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Node.js 20 (as you had)
+# Node.js 20
 RUN --mount=type=secret,id=http_proxy \
     --mount=type=secret,id=https_proxy \
     set -eux; \
@@ -49,21 +53,35 @@ RUN --mount=type=secret,id=http_proxy \
     apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*
 
-# Create jenkins user + add to socket group (GID must match host socket GID)
+# --- Users & groups ---
+# Create primary jenkins group/user with pinned IDs so -u 1000:1000 works cleanly
 RUN set -eux; \
+    groupadd -g "${JENKINS_GID}" jenkins || true; \
+    useradd -m -s /bin/bash -u "${JENKINS_UID}" -g "${JENKINS_GID}" jenkins || true; \
+    # Create docker group matching host's /var/run/docker.sock GID and add jenkins to it
     groupadd -g "${DOCKER_GID}" docker || true; \
-    useradd -m -s /bin/bash jenkins || true; \
-    usermod -aG docker jenkins
+    usermod -aG "${DOCKER_GID}" jenkins; \
+    # Ensure home exists and owned
+    mkdir -p /home/jenkins && chown -R "${JENKINS_UID}:${JENKINS_GID}" /home/jenkins
+
+# --- Sensible defaults for .NET CLI inside CI ---
+ENV HOME=/home/jenkins \
+    DOTNET_CLI_HOME=/home/jenkins \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    NUGET_PACKAGES=/home/jenkins/.nuget/packages
 
 USER jenkins
 WORKDIR /home/jenkins
 
-# Sanity checks
+# Sanity checks (do not fail build if some tools are missing; they are just info)
 RUN set -eux; \
+    id; \
     dotnet --info; \
     node -v; \
     npm -v; \
     python3 --version; \
     mvn -v; \
     make --version; \
-    jq --version
+    jq --version; \
+    which docker || true
