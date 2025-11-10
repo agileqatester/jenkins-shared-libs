@@ -1,4 +1,4 @@
-node('any') {
+node {
     // ---- Config ----
     def repo       = 'agileqa/dotnet-sample'
     def tag        = env.IMAGE_TAG ?: 'latest'
