@@ -9,36 +9,12 @@ node {
     def dockerfile = 'examples/dotnet-app/Dockerfile'          // app Dockerfile
     def buildCtx   = '.'                                       // keep root context
 
-    // Host-side NuGet HOME under workspace; nugetDockerArgs will mount it to /home/jenkins/.nuget
+    // Host-side NuGet HOME under workspace (will be mounted later)
     def nugetHomeHost = "${env.WORKSPACE}/.nuget"
     sh "mkdir -p '${nugetHomeHost}/packages' '${nugetHomeHost}/NuGet' || true"
 
-    // Compose base dockerArgs using your shared lib helper
-    // NOTE: dockerGid must match the group id of /var/run/docker.sock on your host (you found it's 991)
-    def dockerArgsBase = nugetDockerArgs(
-        nugetHomeHost: nugetHomeHost,
-        nugetHomeContainer: '/home/jenkins/.nuget',
-        dockerGid: 991
-    )
-
-    // --- Proxy propagation ---
-    // Collect proxy envs from Jenkins (controller). These will be injected into the inner container.
-    def proxyEnv = []
-    if (env.http_proxy)  proxyEnv << "http_proxy=${env.http_proxy}"
-    if (env.https_proxy) proxyEnv << "https_proxy=${env.https_proxy}"
-    if (env.no_proxy)    proxyEnv << "no_proxy=${env.no_proxy}"
-    if (env.HTTP_PROXY)  proxyEnv << "HTTP_PROXY=${env.HTTP_PROXY}"
-    if (env.HTTPS_PROXY) proxyEnv << "HTTPS_PROXY=${env.HTTPS_PROXY}"
-    if (env.NO_PROXY)    proxyEnv << "NO_PROXY=${env.NO_PROXY}"
-
-    // Extend dockerArgs with -e flags for each proxy variable (so Docker passes them to the container)
-    def dockerArgs = dockerArgsBase +
-        (env.http_proxy  ? " -e http_proxy=${env.http_proxy}"     : "") +
-        (env.https_proxy ? " -e https_proxy=${env.https_proxy}"   : "") +
-        (env.no_proxy    ? " -e no_proxy=${env.no_proxy}"         : "") +
-        (env.HTTP_PROXY  ? " -e HTTP_PROXY=${env.HTTP_PROXY}"     : "") +
-        (env.HTTPS_PROXY ? " -e HTTPS_PROXY=${env.HTTPS_PROXY}"   : "") +
-        (env.NO_PROXY    ? " -e NO_PROXY=${env.NO_PROXY}"         : "")
+    // Will be computed AFTER loading the shared library
+    def dockerArgs = null
 
     // Standard .NET CI env
     def dotnetEnv = [
@@ -49,6 +25,15 @@ node {
         "NUGET_PACKAGES=/home/jenkins/.nuget/packages"
     ]
 
+    // --- Proxy propagation: gather from controller env ---
+    def proxyEnv = []
+    if (env.http_proxy)  proxyEnv << "http_proxy=${env.http_proxy}"
+    if (env.https_proxy) proxyEnv << "https_proxy=${env.https_proxy}"
+    if (env.no_proxy)    proxyEnv << "no_proxy=${env.no_proxy}"
+    if (env.HTTP_PROXY)  proxyEnv << "HTTP_PROXY=${env.HTTP_PROXY}"
+    if (env.HTTPS_PROXY) proxyEnv << "HTTPS_PROXY=${env.HTTPS_PROXY}"
+    if (env.NO_PROXY)    proxyEnv << "NO_PROXY=${env.NO_PROXY}"
+
     timestamps {
         try {
             stage('Checkout') {
@@ -57,7 +42,7 @@ node {
             }
 
             stage('Load Shared Library') {
-                // If your library is public, you can omit credentialsId
+                // If your lib is public, you can omit credentialsId
                 library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
                     $class: 'GitSCMSource',
                     remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
@@ -66,15 +51,35 @@ node {
                 echo 'Shared library loaded.'
             }
 
-            stage('Init Agent') {
+            stage('Init Agent & Compose dockerArgs') {
                 echo "Using build image: ${buildImage}"
+
+                // Compute dockerArgs *after* the library is loaded
+                script {
+                    // dockerGid must match your host’s /var/run/docker.sock group (you verified it’s 991)
+                    def dockerArgsBase = nugetDockerArgs(
+                        nugetHomeHost: nugetHomeHost,
+                        nugetHomeContainer: '/home/jenkins/.nuget',
+                        dockerGid: 991
+                    )
+
+                    // Extend with -e flags for proxy passthrough into the inner container
+                    dockerArgs = dockerArgsBase +
+                        (env.http_proxy  ? " -e http_proxy=${env.http_proxy}"     : "") +
+                        (env.https_proxy ? " -e https_proxy=${env.https_proxy}"   : "") +
+                        (env.no_proxy    ? " -e no_proxy=${env.no_proxy}"         : "") +
+                        (env.HTTP_PROXY  ? " -e HTTP_PROXY=${env.HTTP_PROXY}"     : "") +
+                        (env.HTTPS_PROXY ? " -e HTTPS_PROXY=${env.HTTPS_PROXY}"   : "") +
+                        (env.NO_PROXY    ? " -e NO_PROXY=${env.NO_PROXY}"         : "")
+                }
+                echo "dockerArgs composed."
             }
 
-            // Prepare NuGet mount permissions using your shared step
+            // Prepare NuGet mount permissions using your shared step (now available)
             stage('NuGet Prep') {
                 dotnetNugetPrep(
                     image: buildImage,
-                    dockerArgs: dockerArgs,
+                    dockerArgs: dockerArgs,                          // includes socket, group, nuget mount, and proxies
                     nugetHomeHost: nugetHomeHost,
                     nugetHomeContainer: '/home/jenkins/.nuget',
                     uid: 1000,
@@ -83,7 +88,6 @@ node {
             }
 
             stage('Preflight') {
-                // Pass both dotnet env and proxy env to the inner container
                 withEnv(dotnetEnv + proxyEnv) {
                     docker.image(buildImage).inside(dockerArgs) {
                         sh """
@@ -162,7 +166,7 @@ node {
             throw err
         } finally {
             stage('Cleanup') {
-                docker.image(buildImage).inside(dockerArgs) {
+                docker.image(buildImage).inside(dockerArgs ?: '') {
                     sh 'set -eux; docker image ls | head -n 20 || true'
                 }
             }
