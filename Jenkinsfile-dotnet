@@ -1,28 +1,46 @@
 node {
-    def repo       = 'agileqa/dotnet-sample'
-    def tag        = env.IMAGE_TAG ?: 'latest'
+    // === Image + App configuration ===
+    def buildImage = 'agileqa/jenkins-agent:multi-tool'        // your toolbox image
+    def repo       = 'agileqa/dotnet-sample'                   // Docker Hub app repo
+    def tag        = env.IMAGE_TAG ?: 'latest'                 // image tag
 
-    def projDir    = 'examples/dotnet-app'
-    def dockerfile = 'examples/dotnet-app/Dockerfile'
-    def buildCtx   = '.'
-    def buildImage = 'agileqa/jenkins-agent:multi-tool'
+    // .NET app layout in this repo
+    def projDir    = 'examples/dotnet-app'                     // contains DotnetApp.csproj
+    def dockerfile = 'examples/dotnet-app/Dockerfile'          // app Dockerfile
+    def buildCtx   = '.'                                       // keep root context
 
-    // Host-side NuGet HOME and subdirs (on the controller’s workspace)
+    // Host-side NuGet HOME under workspace; nugetDockerArgs will mount it to /home/jenkins/.nuget
     def nugetHomeHost = "${env.WORKSPACE}/.nuget"
-    sh """
-      set -eux
-      mkdir -p '${nugetHomeHost}/packages'
-      mkdir -p '${nugetHomeHost}/NuGet'
-    """
+    sh "mkdir -p '${nugetHomeHost}/packages' '${nugetHomeHost}/NuGet' || true"
 
-    // Mount Docker socket + full ~/.nuget; and add docker group (GID 991)
-    def dockerArgs = """
-      -v /var/run/docker.sock:/var/run/docker.sock
-      --group-add 991
-      -v ${nugetHomeHost}:/home/jenkins/.nuget
-    """.trim().replaceAll("\\s+", " ")
+    // Compose base dockerArgs using your shared lib helper
+    // NOTE: dockerGid must match the group id of /var/run/docker.sock on your host (you found it's 991)
+    def dockerArgsBase = nugetDockerArgs(
+        nugetHomeHost: nugetHomeHost,
+        nugetHomeContainer: '/home/jenkins/.nuget',
+        dockerGid: 991
+    )
 
-    // .NET environment
+    // --- Proxy propagation ---
+    // Collect proxy envs from Jenkins (controller). These will be injected into the inner container.
+    def proxyEnv = []
+    if (env.http_proxy)  proxyEnv << "http_proxy=${env.http_proxy}"
+    if (env.https_proxy) proxyEnv << "https_proxy=${env.https_proxy}"
+    if (env.no_proxy)    proxyEnv << "no_proxy=${env.no_proxy}"
+    if (env.HTTP_PROXY)  proxyEnv << "HTTP_PROXY=${env.HTTP_PROXY}"
+    if (env.HTTPS_PROXY) proxyEnv << "HTTPS_PROXY=${env.HTTPS_PROXY}"
+    if (env.NO_PROXY)    proxyEnv << "NO_PROXY=${env.NO_PROXY}"
+
+    // Extend dockerArgs with -e flags for each proxy variable (so Docker passes them to the container)
+    def dockerArgs = dockerArgsBase +
+        (env.http_proxy  ? " -e http_proxy=${env.http_proxy}"     : "") +
+        (env.https_proxy ? " -e https_proxy=${env.https_proxy}"   : "") +
+        (env.no_proxy    ? " -e no_proxy=${env.no_proxy}"         : "") +
+        (env.HTTP_PROXY  ? " -e HTTP_PROXY=${env.HTTP_PROXY}"     : "") +
+        (env.HTTPS_PROXY ? " -e HTTPS_PROXY=${env.HTTPS_PROXY}"   : "") +
+        (env.NO_PROXY    ? " -e NO_PROXY=${env.NO_PROXY}"         : "")
+
+    // Standard .NET CI env
     def dotnetEnv = [
         "HOME=/home/jenkins",
         "DOTNET_CLI_HOME=/home/jenkins",
@@ -39,6 +57,7 @@ node {
             }
 
             stage('Load Shared Library') {
+                // If your library is public, you can omit credentialsId
                 library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
                     $class: 'GitSCMSource',
                     remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
@@ -51,40 +70,48 @@ node {
                 echo "Using build image: ${buildImage}"
             }
 
-            // 🔧 New: fix NuGet perms (run once; keep if needed)
-            stage('Fix NuGet perms') {
-                docker.image(buildImage).inside("--user 0 ${dockerArgs}") {
-                    sh '''
-                      set -eux
-                      mkdir -p /home/jenkins/.nuget/NuGet /home/jenkins/.nuget/packages
-                      chown -R 1000:1000 /home/jenkins/.nuget
-                      ls -ld /home/jenkins/.nuget /home/jenkins/.nuget/NuGet /home/jenkins/.nuget/packages
-                    '''
-                }
+            // Prepare NuGet mount permissions using your shared step
+            stage('NuGet Prep') {
+                dotnetNugetPrep(
+                    image: buildImage,
+                    dockerArgs: dockerArgs,
+                    nugetHomeHost: nugetHomeHost,
+                    nugetHomeContainer: '/home/jenkins/.nuget',
+                    uid: 1000,
+                    gid: 1000
+                )
             }
 
             stage('Preflight') {
-                withEnv(dotnetEnv) {
+                // Pass both dotnet env and proxy env to the inner container
+                withEnv(dotnetEnv + proxyEnv) {
                     docker.image(buildImage).inside(dockerArgs) {
                         sh """
                           set -eux
                           echo '=== Preflight ==='
                           whoami; id
                           echo HOME=\$HOME
+                          env | egrep -i 'http_proxy|https_proxy|no_proxy' || true
 
-                          # Confirm we can write into the mount
-                          touch /home/jenkins/.nuget/NuGet/.writetest && rm /home/jenkins/.nuget/NuGet/.writetest
-                          ls -ln /var/run/docker.sock
-                          which docker; docker version
+                          # Verify Docker client/server
+                          which docker
+                          docker version
 
+                          # Quick network probe to NuGet (via proxy if present)
+                          curl -I --max-time 20 https://api.nuget.org/v3/index.json
+
+                          # .NET SDK checks (net7 warning is okay)
                           dotnet --info || true
                           dotnet --list-sdks || true
 
-                          echo '== PWD =='; pwd
+                          echo '== Workspace =='; pwd
                           echo '== Top-level =='; ls -la
                           echo '== Project dir =='; ls -la ${projDir}
                           test -d ${projDir}
                           test -f ${dockerfile}
+
+                          # Confirm we can write into NuGet config dir
+                          touch /home/jenkins/.nuget/NuGet/.writetest && rm /home/jenkins/.nuget/NuGet/.writetest
                           echo '=== Preflight OK ==='
                         """
                     }
@@ -92,7 +119,7 @@ node {
             }
 
             stage('Build (.NET)') {
-                withEnv(dotnetEnv) {
+                withEnv(dotnetEnv + proxyEnv) {
                     docker.image(buildImage).inside(dockerArgs) {
                         dir(projDir) {
                             sh '''
@@ -106,7 +133,7 @@ node {
             }
 
             stage('Docker Build & Push (App)') {
-                withEnv(dotnetEnv + ["DOCKER_BUILDKIT=1"]) {
+                withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=1"]) {
                     docker.image(buildImage).inside(dockerArgs) {
                         docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
                             def app = docker.build("${repo}:${tag}", "-f ${dockerfile} ${buildCtx}")
@@ -124,6 +151,7 @@ node {
                     sh """
                       set -eux
                       docker rm -f dotnet_sample_container || true
+                      # If app is console-only, remove the -p mapping; if ASP.NET on port 80, keep it:
                       docker run -d --name dotnet_sample_container -p 8080:80 "${repo}:${tag}"
                     """
                 }
