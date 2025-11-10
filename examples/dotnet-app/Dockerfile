@@ -31,12 +31,12 @@ COPY . .
 RUN --mount=type=cache,target=/root/.nuget/packages \
     dotnet publish examples/dotnet-app/DotnetApp.csproj -c Release -o /app/publish
 
-# If you want a runtime-only final image, uncomment below and adjust entrypoint accordingly:
+# For single-stage image (simple demo):
+WORKDIR /app/publish
+ENTRYPOINT ["dotnet","DotnetApp.dll"]
+
+# If you prefer a multi-stage runtime image instead, replace the last 3 lines with:
 # FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 # WORKDIR /app
 # COPY --from=build /app/publish .
 # ENTRYPOINT ["dotnet","DotnetApp.dll"]
-
-# For now (single-stage), set the default action to run the published app
-WORKDIR /app/publish
-ENTRYPOINT ["dotnet","DotnetApp.dll"]

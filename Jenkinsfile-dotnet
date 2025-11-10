@@ -152,46 +152,46 @@ node {
                         withCredentials([usernamePassword(credentialsId: 'docker-hub-agileqa',
                                                         usernameVariable: 'DOCKER_USER',
                                                         passwordVariable: 'DOCKER_PASS')]) {
-                            sh """
-                            set -eux
+                            sh """#!/usr/bin/env bash
+            set -Eeuo pipefail
 
-                            # Login (secure)
-                            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+            # Login (secure)
+            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
 
-                            # Compose proxy build args (only pass what exists)
-                            proxyArgs=""
-                            [ -n "${http_proxy:-}"  ] && proxyArgs="$proxyArgs --build-arg http_proxy=$http_proxy"
-                            [ -n "${https_proxy:-}" ] && proxyArgs="$proxyArgs --build-arg https_proxy=$https_proxy"
-                            [ -n "${no_proxy:-}" ]    && proxyArgs="$proxyArgs --build-arg no_proxy=$no_proxy"
-                            [ -n "${HTTP_PROXY:-}"  ] && proxyArgs="$proxyArgs --build-arg HTTP_PROXY=$HTTP_PROXY"
-                            [ -n "${HTTPS_PROXY:-}" ] && proxyArgs="$proxyArgs --build-arg HTTPS_PROXY=$HTTPS_PROXY"
-                            [ -n "${NO_PROXY:-}" ]    && proxyArgs="$proxyArgs --build-arg NO_PROXY=$NO_PROXY"
+            # Compose proxy build args (only pass what exists)
+            proxyArgs=""
+            [[ -n "\${http_proxy:-}"  ]] && proxyArgs="\$proxyArgs --build-arg http_proxy=\$http_proxy"
+            [[ -n "\${https_proxy:-}" ]] && proxyArgs="\$proxyArgs --build-arg https_proxy=\$https_proxy"
+            [[ -n "\${no_proxy:-}"    ]] && proxyArgs="\$proxyArgs --build-arg no_proxy=\$no_proxy"
+            [[ -n "\${HTTP_PROXY:-}"  ]] && proxyArgs="\$proxyArgs --build-arg HTTP_PROXY=\$HTTP_PROXY"
+            [[ -n "\${HTTPS_PROXY:-}" ]] && proxyArgs="\$proxyArgs --build-arg HTTPS_PROXY=\$HTTPS_PROXY"
+            [[ -n "\${NO_PROXY:-}"    ]] && proxyArgs="\$proxyArgs --build-arg NO_PROXY=\$NO_PROXY"
 
-                            if [ "${useBuildx}" = "true" ]; then
-                                # Ensure a builder exists and is active
-                                docker buildx create --use --name jxbuilder || true
-                                docker buildx inspect --bootstrap
+            if [[ "${useBuildx}" == "true" ]]; then
+            # Ensure a builder exists and is active
+            docker buildx create --use --name jxbuilder || true
+            docker buildx inspect --bootstrap
 
-                                # Build with Buildx and LOAD into the local engine (needed for Deploy Locally)
-                                docker buildx build --progress=plain --load $proxyArgs \
-                                -t ${repo}:${tag} \
-                                -f ${dockerfile} ${buildCtx}
-                            else
-                                # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
-                                docker build --progress=plain $proxyArgs \
-                                -t ${repo}:${tag} \
-                                -f ${dockerfile} ${buildCtx}
-                            fi
+            # Build with Buildx and LOAD into the local engine (needed for Deploy Locally)
+            docker buildx build --progress=plain --load \$proxyArgs \
+                -t ${repo}:${tag} \
+                -f ${dockerfile} ${buildCtx}
+            else
+            # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
+            docker build --progress=plain \$proxyArgs \
+                -t ${repo}:${tag} \
+                -f ${dockerfile} ${buildCtx}
+            fi
 
-                            # Push tags
-                            docker push ${repo}:${tag}
-                            if [ "${tag}" != "latest" ]; then
-                                docker tag ${repo}:${tag} ${repo}:latest
-                                docker push ${repo}:latest
-                            fi
+            # Push tags
+            docker push ${repo}:${tag}
+            if [[ "${tag}" != "latest" ]]; then
+            docker tag ${repo}:${tag} ${repo}:latest
+            docker push ${repo}:latest
+            fi
 
-                            docker logout || true
-                            """
+            docker logout || true
+            """
                         }
                     }
                 }
