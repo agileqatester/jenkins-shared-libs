@@ -31,12 +31,13 @@ COPY . .
 RUN --mount=type=cache,target=/root/.nuget/packages \
     dotnet publish examples/dotnet-app/DotnetApp.csproj -c Release -o /app/publish
 
-# For single-stage image (simple demo):
+# ---- Runtime configuration (single-stage for demo) ----
 WORKDIR /app/publish
-ENTRYPOINT ["dotnet","DotnetApp.dll"]
 
-# If you prefer a multi-stage runtime image instead, replace the last 3 lines with:
-# FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
-# WORKDIR /app
-# COPY --from=build /app/publish .
-# ENTRYPOINT ["dotnet","DotnetApp.dll"]
+# Bind Kestrel to port 80 inside the container
+ENV ASPNETCORE_URLS=http://+:80
+
+# Document the port so tools (and -P if you use it) know what's exposed
+EXPOSE 80
+
+ENTRYPOINT ["dotnet", "DotnetApp.dll"]

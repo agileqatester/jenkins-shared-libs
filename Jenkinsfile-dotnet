@@ -198,23 +198,29 @@ node {
             }
             
             stage('Deploy Locally') {
+            // Scripted pipeline: 'def' is fine here
             withEnv(["REPO=${repo}", "TAG=${tag}"]) {
-                // Ensure your .inside() can reach the host via host.docker.internal
+
+                // Allow the inner build container to talk to the host Docker and reach mapped ports
                 def dockerArgs = '--add-host=host.docker.internal:host-gateway -v /var/run/docker.sock:/var/run/docker.sock'
 
                 docker.image(buildImage).inside(dockerArgs) {
                 sh '''#!/usr/bin/env bash
             set -Eeuo pipefail
 
+            echo "==> Cleaning previous container if any"
             docker rm -f dotnet_sample_container || true
 
-            # App listens on 8080 in-container by default; map to a RANDOM host port
-            cid=$(docker run -d --name dotnet_sample_container -p 0:8080 "${REPO}:${TAG}")
+            echo "==> Starting app container and publishing container 80 to a RANDOM host port"
+            cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
 
-            # Read back the mapped host port for 8080/tcp
-            mapped=$(docker port dotnet_sample_container 8080/tcp | awk -F: '{print $NF}')
+            echo "==> Waiting a moment for container networking to initialize"
+            sleep 1
+
+            echo "==> Discovering mapped host port for 80/tcp"
+            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
             if [[ -z "${mapped:-}" ]]; then
-            echo "Failed to detect mapped port for 8080/tcp"
+            echo "Failed to detect mapped port for 80/tcp"
             docker ps -a
             docker inspect dotnet_sample_container || true
             docker logs dotnet_sample_container || true
@@ -223,11 +229,29 @@ node {
 
             echo "Container ${cid} is mapped to host port: ${mapped}"
 
-            # If you curl from inside this .inside() container, use host.docker.internal
-            echo "APP_URL=http://host.docker.internal:${mapped}" | tee app_url.properties
+            # Since we are inside the build container (docker.image(...).inside),
+            # 'localhost:${mapped}' would hit the build container, not the Docker host.
+            # Use host.docker.internal (we added the host-gateway mapping above).
+            APP_URL="http://host.docker.internal:${mapped}"
+            echo "APP_URL=${APP_URL}" | tee app_url.properties
+
+            echo "==> Probing readiness (HTTP 200 expected)"
+            for i in {1..30}; do
+            if curl -fsS "${APP_URL}/" >/dev/null; then
+                echo "App is responding at ${APP_URL}"
+                break
+            fi
+            sleep 1
+            if (( i == 30 )); then
+                echo "App did not become ready in time"
+                docker logs dotnet_sample_container || true
+                exit 1
+            fi
+            done
             '''
-                archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
+                // Archive the URL for visibility in Jenkins
+                archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
             }
             }
 
