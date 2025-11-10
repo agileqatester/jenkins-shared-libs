@@ -1,14 +1,16 @@
-def call(String projectType) {
-    switch(projectType) {
-        case 'node':
-            return 'node:18'
-        case 'java':
-            return 'maven:3.8.6-openjdk-11'
-        case 'gradle':
-            return 'gradle:7.6-jdk11'
+
+// Shared Library: vars/selectAgent.groovy
+def call(appType) {
+    switch(appType) {
         case 'dotnet':
-            return 'mcr.microsoft.com/dotnet/sdk:7.0'
+            return 'agileqa/jenkins-agent:multi-tool'
+        case 'nodejs':
+            return 'node:20'
+        case 'python':
+            return 'python:3.11'
+        case 'java':
+            return 'maven:3.9.4-eclipse-temurin-17'
         default:
-            error "Unknown project type: ${projectType}"
+            error "Unknown app type: ${appType}"
     }
-}
+} 

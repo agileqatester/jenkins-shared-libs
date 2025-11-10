@@ -1,12 +1,13 @@
-def repo       = 'agileqa/dotnet-sample'
-def tag        = env.IMAGE_TAG ?: 'latest'
-def buildCtx   = 'examples/dotnet-app'
-def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
 
-def buildImage = selectAgent('dotnet') // returns something like 'mcr.microsoft.com/dotnet/sdk:7.0'
+node {
+    def repo       = 'agileqa/dotnet-sample'
+    def tag        = env.IMAGE_TAG ?: 'latest'
+    def buildCtx   = 'examples/dotnet-app'
+    def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
 
-timestamps {
-    docker.image(buildImage).inside(dockerArgs) {
+    def buildImage = null
+
+    timestamps {
         try {
             stage('Checkout') {
                 checkout scm
@@ -21,28 +22,40 @@ timestamps {
                 echo 'Shared library loaded.'
             }
 
+            stage('Init Agent') {
+                buildImage = 'agileqa/jenkins-agent:multi-tool'
+                echo "Using build image: ${buildImage}"
+            }
+
             stage('Build (.NET)') {
-                dir(buildCtx) {
-                    runBuild('dotnet') // assumes this runs dotnet restore/build/test
+                docker.image(buildImage).inside(dockerArgs) {
+                    dir(buildCtx) {
+                        sh 'dotnet restore'
+                        sh 'dotnet build --configuration Release'
+                    }
                 }
             }
 
             stage('Docker Build & Push') {
-                docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                    def app = docker.build("${repo}:${tag}", buildCtx)
-                    app.push()
-                    if (tag != 'latest') {
-                        sh "docker tag ${repo}:${tag} ${repo}:latest"
-                        sh "docker push ${repo}:latest"
+                docker.image(buildImage).inside(dockerArgs) {
+                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
+                        def app = docker.build("${repo}:${tag}", buildCtx)
+                        app.push()
+                        if (tag != 'latest') {
+                            sh "docker tag ${repo}:${tag} ${repo}:latest"
+                            sh "docker push ${repo}:latest"
+                        }
                     }
                 }
             }
 
             stage('Deploy Locally') {
-                sh """
-                    docker rm -f dotnet_sample_container || true
-                    docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
-                """
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh """
+                        docker rm -f dotnet_sample_container || true
+                        docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
+                    """
+                }
             }
         } catch (err) {
             currentBuild.result = 'FAILURE'
@@ -55,3 +68,4 @@ timestamps {
         }
     }
 }
+
