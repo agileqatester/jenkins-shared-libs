@@ -198,12 +198,12 @@ node {
             }
             
   stage('Deploy Locally') {
-    // If you set repo/tag earlier, keep those. Otherwise, set explicitly here:
+    // If you already define repo/tag earlier in the pipeline, keep those.
     withEnv([
       "REPO=${repo}",
       "TAG=${tag}"
     ]) {
-
+      // Run docker CLI inside the build container with access to host Docker and host gateway
       docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
         sh '''#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -215,10 +215,11 @@ ls -l /var/run/docker.sock || true
 echo "==> Using image: ${REPO}:${TAG}"
 IMG_ID=$(docker image inspect "${REPO}:${TAG}" --format '{{.Id}}')
 echo "${IMG_ID}"
+
 EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}')
 echo "ExposedPorts: ${EXPOSED}"
 if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
-  echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp." >&2
+  echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp" >&2
   exit 1
 fi
 
@@ -228,51 +229,54 @@ docker rm -f dotnet_sample_container || true
 echo "==> Starting web container and publishing EXPOSEd ports (-P)"
 cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
 
-# Give Docker a moment to register port mapping
+# Brief pause to ensure NetworkSettings.Ports populated
 sleep 1
 
 echo "==> docker ps:"
 docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
 
-# Extract mapped host port for 80/tcp and SANITIZE it (strip CR/LF and non-digits)
-raw=$(docker port dotnet_sample_container 80/tcp || true)
-echo "docker port raw: '${raw}'"
-mapped=$(printf "%s" "${raw}" | awk -F: '{print $NF}' | tr -d "\\r\\n" | sed 's/[^0-9]//g')
-
-if [[ -z "${mapped:-}" ]]; then
-  echo "ERROR: No public port for 80/tcp."
+echo "==> Getting mapped host port via docker inspect (single value)"
+mapped=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' dotnet_sample_container || true)
+mapped=$(printf "%s" "${mapped}" | tr -d '\\r\\n')
+if [[ -z "${mapped}" ]]; then
+  echo "ERROR: No public port found for 80/tcp" >&2
   echo "Diagnostics:"
   docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
   docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
   docker logs dotnet_sample_container || true
   exit 1
 fi
+echo "==> Mapped host port: ${mapped}"
 
-echo "==> Mapped host port (sanitized): ${mapped}"
-
-# Build a clean URL and verify DNS to host.docker.internal
+# Inside the build container, reach host via host.docker.internal (added by --add-host)
 APP_URL="http://host.docker.internal:${mapped}"
 echo "APP_URL=${APP_URL}" | tee app_url.properties
+echo "APP_URL=${APP_URL}"
 
-echo "==> Checking host.docker.internal resolves (ping once)"
-getent hosts host.docker.internal || true
-
-echo "==> Probing readiness (GET /health)"
+echo "==> Probing readiness (try /health then /)"
+ready=0
 for i in {1..30}; do
-  if curl -fsS "${APP_URL}/health" >/dev/null; then
-    echo "App is responding at ${APP_URL}"
+  if curl -fsS "${APP_URL}/health" >/dev/null 2>&1; then
+    echo "Health endpoint OK at ${APP_URL}/health"
+    ready=1
+    break
+  elif curl -fsS "${APP_URL}/" >/dev/null 2>&1; then
+    echo "Root endpoint OK at ${APP_URL}/"
+    ready=1
     break
   fi
   sleep 1
-  if (( i == 30 )); then
-    echo "App did not become ready in time" >&2
-    docker logs dotnet_sample_container || true
-    exit 1
-  fi
 done
+
+if [[ "${ready}" -ne 1 ]]; then
+  echo "App did not become ready in time" >&2
+  docker logs dotnet_sample_container || true
+  exit 1
+fi
 '''
       }
 
+      // Archive after inside{} so Jenkins can collect from the workspace
       archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
     }
   }
