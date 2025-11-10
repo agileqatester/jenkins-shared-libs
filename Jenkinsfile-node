@@ -1,22 +1,33 @@
-library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
-    $class: 'GitSCMSource',
-    remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
-    credentialsId: 'git-agiletester'
-])
-
-def nodeImage = selectAgent('node') // Shared library call
-
 pipeline {
-    agent {
-        docker {
-            image "${nodeImage}"
-            args '-v /var/run/docker.sock:/var/run/docker.sock'
+    agent none
+
+    stages {
+        stage('Init') {
+            agent any
+            steps {
+                script {
+                        library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
+                            $class: 'GitSCMSource',
+                            remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
+                            credentialsId: 'git-agiletester'
+                    ])                            
+                    def nodeImage = selectAgent('node') // Shared library call
+                }
+            }
         }
-    }
-    environment {
-        DOCKERHUB_REPO = 'agileqa/node-sample'
-        IMAGE_TAG = 'latest'
-    }
+
+
+    stage('Build in Docker') {
+        agent {
+            docker {
+                image "${nodeImage}"
+                args '-v /var/run/docker.sock:/var/run/docker.sock'
+            }
+        }
+        environment {
+            DOCKERHUB_REPO = 'agileqa/node-sample'
+            IMAGE_TAG = 'latest'
+        }
     stages {
         stage('Build') {
             steps {
@@ -41,6 +52,8 @@ pipeline {
                     docker rm -f node_sample_container || true
                     docker run -d --name node_sample_container -p 3000:3000 ${DOCKERHUB_REPO}:${IMAGE_TAG}
                 """
+                    }
+                }                
             }
         }
     }
