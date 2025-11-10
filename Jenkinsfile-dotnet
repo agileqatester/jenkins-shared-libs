@@ -61,15 +61,16 @@ node {
             }
 
             stage('Docker Build & Push') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                        def app = docker.build("${repo}:${tag}", buildCtx)
-                        app.push()
-                        if (tag != 'latest') {
-                            sh "set -eux; docker tag ${repo}:${tag} ${repo}:latest; docker push ${repo}:latest"
-                        }
-                    }
+            docker.image(buildImage).inside(dockerArgs) {
+                docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
+                // Use the app Dockerfile under examples/dotnet-app
+                def app = docker.build("${repo}:${tag}", "-f examples/dotnet-app/Dockerfile .")
+                app.push()
+                if (tag != 'latest') {
+                    sh "set -eux; docker tag ${repo}:${tag} ${repo}:latest; docker push ${repo}:latest"
                 }
+                }
+            }
             }
 
             stage('Deploy Locally') {
