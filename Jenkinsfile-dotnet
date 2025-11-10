@@ -198,61 +198,46 @@ node {
             }
             
             stage('Deploy Locally') {
-            // Scripted pipeline: 'def' is fine here
-            withEnv(["REPO=${repo}", "TAG=${tag}"]) {
+                withEnv(["REPO=${repo}", "TAG=${tag}"]) {
 
-                // Allow the inner build container to talk to the host Docker and reach mapped ports
-                def dockerArgs = '--add-host=host.docker.internal:host-gateway -v /var/run/docker.sock:/var/run/docker.sock'
-
-                docker.image(buildImage).inside(dockerArgs) {
+                docker.image(buildImage).inside('--add-host=host.docker.internal:host-gateway -v /var/run/docker.sock:/var/run/docker.sock') {
                 sh '''#!/usr/bin/env bash
-            set -Eeuo pipefail
+                    set -Eeuo pipefail
 
-            echo "==> Cleaning previous container if any"
-            docker rm -f dotnet_sample_container || true
+                    docker rm -f dotnet_sample_container || true
 
-            echo "==> Starting app container and publishing container 80 to a RANDOM host port"
-            cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
+                    cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
+                    sleep 1
 
-            echo "==> Waiting a moment for container networking to initialize"
-            sleep 1
+                    mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
+                    if [[ -z "${mapped:-}" ]]; then
+                    echo "Failed to detect mapped port for 80/tcp"
+                    docker ps -a
+                    docker inspect dotnet_sample_container || true
+                    docker logs dotnet_sample_container || true
+                    exit 1
+                    fi
 
-            echo "==> Discovering mapped host port for 80/tcp"
-            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
-            if [[ -z "${mapped:-}" ]]; then
-            echo "Failed to detect mapped port for 80/tcp"
-            docker ps -a
-            docker inspect dotnet_sample_container || true
-            docker logs dotnet_sample_container || true
-            exit 1
-            fi
+                    APP_URL="http://host.docker.internal:${mapped}"
+                    echo "APP_URL=${APP_URL}" | tee app_url.properties
 
-            echo "Container ${cid} is mapped to host port: ${mapped}"
-
-            # Since we are inside the build container (docker.image(...).inside),
-            # 'localhost:${mapped}' would hit the build container, not the Docker host.
-            # Use host.docker.internal (we added the host-gateway mapping above).
-            APP_URL="http://host.docker.internal:${mapped}"
-            echo "APP_URL=${APP_URL}" | tee app_url.properties
-
-            echo "==> Probing readiness (HTTP 200 expected)"
-            for i in {1..30}; do
-            if curl -fsS "${APP_URL}/" >/dev/null; then
-                echo "App is responding at ${APP_URL}"
-                break
-            fi
-            sleep 1
-            if (( i == 30 )); then
-                echo "App did not become ready in time"
-                docker logs dotnet_sample_container || true
-                exit 1
-            fi
-            done
-            '''
+                    for i in {1..30}; do
+                    if curl -fsS "${APP_URL}/" >/dev/null; then
+                        echo "App is responding at ${APP_URL}"
+                        break
+                    fi
+                    sleep 1
+                    if (( i == 30 )); then
+                        echo "App did not become ready in time"
+                        docker logs dotnet_sample_container || true
+                        exit 1
+                    fi
+                    done
+                    '''
                 }
-                // Archive the URL for visibility in Jenkins
+
                 archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
-            }
+                }
             }
 
         } catch (err) {
