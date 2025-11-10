@@ -1,58 +1,68 @@
-pipeline {
-    agent none
+node('any') {
+    // ---- Config ----
+    def repo       = 'agileqa/dotnet-sample'
+    def tag        = env.IMAGE_TAG ?: 'latest'
+    def buildCtx   = 'examples/dotnet-app'
+    def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
 
-    stages {
-        stage('Init') {
-            agent any
-            steps {
-                script {
-                    library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
-                        $class: 'GitSCMSource',
-                        remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
-                        credentialsId: 'git-agiletester'
-                    ])
-                    dotnetImage = selectAgent('dotnet')
+    def buildImage = null
+
+    timestamps {
+        try {
+            stage('Checkout') {
+                checkout scm
+            }
+
+            stage('Load Shared Library') {
+                library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
+                    $class: 'GitSCMSource',
+                    remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
+                    credentialsId: 'git-agiletester'
+                ])
+                echo 'Shared library loaded.'
+            }
+
+            stage('Init Agent') {
+                buildImage = selectAgent('dotnet')
+                echo "Using build image: ${buildImage}"
+            }
+
+            stage('Build (.NET)') {
+                docker.image(buildImage).inside(dockerArgs) {
+                    dir(buildCtx) {
+                        runBuild('dotnet')
+                    }
                 }
             }
-        }
 
-        stage('Build in Docker') {
-            agent {
-                docker {
-                    image "${dotnetImage}"
-                    args '-v /var/run/docker.sock:/var/run/docker.sock'
-                }
-            }
-            environment {
-                DOCKERHUB_REPO = 'agileqa/dotnet-sample'
-                IMAGE_TAG = 'latest'
-            }
-            stages {
-                stage('Build') {
-                    steps {
-                        dir('examples/dotnet-app') {
-                            runBuild('dotnet')
+            stage('Docker Build & Push') {
+                docker.image(buildImage).inside(dockerArgs) {
+                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
+                        def app = docker.build("${repo}:${tag}", buildCtx)
+                        app.push()
+                        if (tag != 'latest') {
+                            sh "docker tag ${repo}:${tag} ${repo}:latest"
+                            sh "docker push ${repo}:latest"
                         }
                     }
                 }
-                stage('Docker Build & Push') {
-                    steps {
-                        script {
-                            docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                                def app = docker.build("${DOCKERHUB_REPO}:${IMAGE_TAG}")
-                                app.push()
-                            }
-                        }
-                    }
+            }
+
+            stage('Deploy Locally') {
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh """
+                        docker rm -f dotnet_sample_container || true
+                        docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
+                    """
                 }
-                stage('Deploy Locally') {
-                    steps {
-                        sh """
-                            docker rm -f dotnet_sample_container || true
-                            docker run -d --name dotnet_sample_container -p 8080:80 ${DOCKERHUB_REPO}:${IMAGE_TAG}
-                        """
-                    }
-                }
+            }
+        } catch (err) {
+            currentBuild.result = 'FAILURE'
+            echo "Pipeline failed: ${err}"
+            throw err
+        } finally {
+            stage('Cleanup') {
+                sh 'docker image ls | head -n 20 || true'
             }
         }
     }
