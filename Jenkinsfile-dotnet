@@ -197,67 +197,85 @@ node {
                 }
             }
             
-            stage('Deploy Locally') {
-                withEnv([
-                "REPO=${repo}",           // make sure these are set above
-                "TAG=${tag}"              // and point to the image you just built in this run
-                ]) {
-                docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
-                    sh '''#!/usr/bin/env bash
-            set -Eeuo pipefail
+  stage('Deploy Locally') {
+    // If you set repo/tag earlier, keep those. Otherwise, set explicitly here:
+    withEnv([
+      "REPO=${repo}",
+      "TAG=${tag}"
+    ]) {
 
-            echo "==> Who am I and what are socket perms?"
-            id
-            ls -l /var/run/docker.sock || true
+      docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
+        sh '''#!/usr/bin/env bash
+set -Eeuo pipefail
 
-            echo "==> Using image: ${REPO}:${TAG}"
-            docker image inspect "${REPO}:${TAG}" --format '{{.Id}}'
-            EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}')
-            echo "ExposedPorts: ${EXPOSED}"
-            if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
-            echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp." >&2
-            exit 1
-            fi
+echo "==> Who am I and what are socket perms?"
+id
+ls -l /var/run/docker.sock || true
 
-            echo "==> Cleaning previous container if any"
-            docker rm -f dotnet_sample_container || true
+echo "==> Using image: ${REPO}:${TAG}"
+IMG_ID=$(docker image inspect "${REPO}:${TAG}" --format '{{.Id}}')
+echo "${IMG_ID}"
+EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}')
+echo "ExposedPorts: ${EXPOSED}"
+if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
+  echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp." >&2
+  exit 1
+fi
 
-            echo "==> Starting web container and publishing EXPOSEd ports (-P)"
-            cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
+echo "==> Cleaning previous container if any"
+docker rm -f dotnet_sample_container || true
 
-            sleep 1
+echo "==> Starting web container and publishing EXPOSEd ports (-P)"
+cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
 
-            echo "==> Discovering mapped host port for 80/tcp"
-            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}' || true)
-            if [[ -z "${mapped:-}" ]]; then
-            echo "ERROR: No public port for 80/tcp."
-            docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
-            docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
-            docker logs dotnet_sample_container || true
-            exit 1
-            fi
+# Give Docker a moment to register port mapping
+sleep 1
 
-            APP_URL="http://host.docker.internal:${mapped}"
-            echo "APP_URL=${APP_URL}" | tee app_url.properties
+echo "==> docker ps:"
+docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
 
-            echo "==> Probing readiness"
-            for i in {1..30}; do
-            if curl -fsS "${APP_URL}/health" >/dev/null; then
-                echo "App is responding at ${APP_URL}"
-                break
-            fi
-            sleep 1
-            if (( i == 30 )); then
-                echo "App did not become ready in time"
-                docker logs dotnet_sample_container || true
-                exit 1
-            fi
-            done
-            '''
-                }
-                archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
-                }
-            }
+# Extract mapped host port for 80/tcp and SANITIZE it (strip CR/LF and non-digits)
+raw=$(docker port dotnet_sample_container 80/tcp || true)
+echo "docker port raw: '${raw}'"
+mapped=$(printf "%s" "${raw}" | awk -F: '{print $NF}' | tr -d "\\r\\n" | sed 's/[^0-9]//g')
+
+if [[ -z "${mapped:-}" ]]; then
+  echo "ERROR: No public port for 80/tcp."
+  echo "Diagnostics:"
+  docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
+  docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
+  docker logs dotnet_sample_container || true
+  exit 1
+fi
+
+echo "==> Mapped host port (sanitized): ${mapped}"
+
+# Build a clean URL and verify DNS to host.docker.internal
+APP_URL="http://host.docker.internal:${mapped}"
+echo "APP_URL=${APP_URL}" | tee app_url.properties
+
+echo "==> Checking host.docker.internal resolves (ping once)"
+getent hosts host.docker.internal || true
+
+echo "==> Probing readiness (GET /health)"
+for i in {1..30}; do
+  if curl -fsS "${APP_URL}/health" >/dev/null; then
+    echo "App is responding at ${APP_URL}"
+    break
+  fi
+  sleep 1
+  if (( i == 30 )); then
+    echo "App did not become ready in time" >&2
+    docker logs dotnet_sample_container || true
+    exit 1
+  fi
+done
+'''
+      }
+
+      archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
+    }
+  }
 
         } catch (err) {
             currentBuild.result = 'FAILURE'
