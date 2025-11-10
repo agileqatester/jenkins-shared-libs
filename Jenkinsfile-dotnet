@@ -1,6 +1,12 @@
 node {
+    // --- Pipeline parameters to control Docker build behavior ---
+    properties([parameters([
+        booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit'),
+        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx explicitly (requires buildx plugin in agent)')
+    ])])
+
     // === Image + App configuration ===
-    def buildImage = 'agileqa/jenkins-agent:multi-tool'        // your toolbox image
+    def buildImage = 'agileqa/jenkins-agent:multi-tool'        // your toolbox image (now includes buildx)
     def repo       = 'agileqa/dotnet-sample'                   // Docker Hub app repo
     def tag        = env.IMAGE_TAG ?: 'latest'                 // image tag
 
@@ -54,7 +60,6 @@ node {
             stage('Init Agent & Compose dockerArgs') {
                 echo "Using build image: ${buildImage}"
 
-                // Compute dockerArgs *after* the library is loaded
                 script {
                     // dockerGid must match your host’s /var/run/docker.sock group (you verified it’s 991)
                     def dockerArgsBase = nugetDockerArgs(
@@ -100,11 +105,12 @@ node {
                           # Verify Docker client/server
                           which docker
                           docker version
+                          docker buildx version || true
 
                           # Quick network probe to NuGet (via proxy if present)
                           curl -I --max-time 20 https://api.nuget.org/v3/index.json
 
-                          # .NET SDK checks (net7 warning is okay)
+                          # .NET SDK checks
                           dotnet --info || true
                           dotnet --list-sdks || true
 
@@ -137,14 +143,39 @@ node {
             }
 
             stage('Docker Build & Push (App)') {
-                withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=1"]) {
+                // Enable/disable BuildKit via parameter; optionally switch to buildx path
+                def bk = params.USE_BUILDKIT ? '1' : '0'
+                def useBuildx = params.USE_BUILDX
+
+                withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=${bk}"]) {
                     docker.image(buildImage).inside(dockerArgs) {
-                        docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                            def app = docker.build("${repo}:${tag}", "-f ${dockerfile} ${buildCtx}")
-                            app.push()
-                            if (tag != 'latest') {
-                                sh "set -eux; docker tag ${repo}:${tag} ${repo}:latest; docker push ${repo}:latest"
-                            }
+                        withCredentials([usernamePassword(credentialsId: 'docker-hub-agileqa',
+                                                          usernameVariable: 'DOCKER_USER',
+                                                          passwordVariable: 'DOCKER_PASS')]) {
+                            sh """
+                              set -eux
+                              echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+
+                              if [ "${useBuildx}" = "true" ]; then
+                                # Ensure a builder exists and is active
+                                docker buildx create --use --name jxbuilder || true
+                                docker buildx inspect --bootstrap
+                                # Build and load into the local Docker engine so 'Deploy Locally' works
+                                docker buildx build --progress=plain --load \\
+                                  -t ${repo}:${tag} \\
+                                  -f ${dockerfile} ${buildCtx}
+                              else
+                                # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
+                                docker build --progress=plain -t ${repo}:${tag} -f ${dockerfile} ${buildCtx}
+                              fi
+
+                              docker push ${repo}:${tag}
+                              if [ "${tag}" != "latest" ]; then
+                                docker tag ${repo}:${tag} ${repo}:latest
+                                docker push ${repo}:latest
+                              fi
+                              docker logout || true
+                            """
                         }
                     }
                 }

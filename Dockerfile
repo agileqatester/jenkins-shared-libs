@@ -23,7 +23,7 @@ RUN --mount=type=secret,id=http_proxy \
     apt-get install -y --no-install-recommends git make jq python3 python3-pip maven; \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI (client only)
+# Install Docker CLI (+ Buildx and Compose plugins)
 RUN --mount=type=secret,id=http_proxy \
     --mount=type=secret,id=https_proxy \
     set -eux; \
@@ -37,7 +37,11 @@ RUN --mount=type=secret,id=http_proxy \
     apt-get update \
       -o Acquire::http::Proxy="$http_proxy" \
       -o Acquire::https::Proxy="$https_proxy"; \
-    apt-get install -y --no-install-recommends docker-ce-cli; \
+    # Core CLI
+    apt-get install -y --no-install-recommends docker-ce-cli \
+    # Buildx & Compose plugins (fixes your error and gives compose v2)
+                         docker-buildx-plugin \
+                         docker-compose-plugin; \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20
@@ -54,14 +58,11 @@ RUN --mount=type=secret,id=http_proxy \
     rm -rf /var/lib/apt/lists/*
 
 # --- Users & groups ---
-# Create primary jenkins group/user with pinned IDs so -u 1000:1000 works cleanly
 RUN set -eux; \
     groupadd -g "${JENKINS_GID}" jenkins || true; \
     useradd -m -s /bin/bash -u "${JENKINS_UID}" -g "${JENKINS_GID}" jenkins || true; \
-    # Create docker group matching host's /var/run/docker.sock GID and add jenkins to it
     groupadd -g "${DOCKER_GID}" docker || true; \
     usermod -aG "${DOCKER_GID}" jenkins; \
-    # Ensure home exists and owned
     mkdir -p /home/jenkins && chown -R "${JENKINS_UID}:${JENKINS_GID}" /home/jenkins
 
 # --- Sensible defaults for .NET CLI inside CI ---
@@ -74,7 +75,7 @@ ENV HOME=/home/jenkins \
 USER jenkins
 WORKDIR /home/jenkins
 
-# Sanity checks (do not fail build if some tools are missing; they are just info)
+# Sanity checks (informational only)
 RUN set -eux; \
     id; \
     dotnet --info; \
@@ -84,4 +85,7 @@ RUN set -eux; \
     mvn -v; \
     make --version; \
     jq --version; \
-    which docker || true
+    which docker || true; \
+    docker --version || true; \
+    docker buildx version || true; \
+    docker compose version || true
