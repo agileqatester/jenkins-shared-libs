@@ -1,13 +1,12 @@
-node {
-    // ---- Config ----
-    def repo       = 'agileqa/dotnet-sample'
-    def tag        = env.IMAGE_TAG ?: 'latest'
-    def buildCtx   = 'examples/dotnet-app'
-    def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
+def repo       = 'agileqa/dotnet-sample'
+def tag        = env.IMAGE_TAG ?: 'latest'
+def buildCtx   = 'examples/dotnet-app'
+def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
 
-    def buildImage = null
+def buildImage = selectAgent('dotnet') // returns something like 'mcr.microsoft.com/dotnet/sdk:7.0'
 
-    timestamps {
+timestamps {
+    docker.image(buildImage).inside(dockerArgs) {
         try {
             stage('Checkout') {
                 checkout scm
@@ -22,14 +21,9 @@ node {
                 echo 'Shared library loaded.'
             }
 
-            stage('Init Agent') {
-                buildImage = selectAgent('dotnet')
-                echo "Using build image: ${buildImage}"
-            }
-
             stage('Build (.NET)') {
                 dir(buildCtx) {
-                    runBuild('dotnet')
+                    runBuild('dotnet') // assumes this runs dotnet restore/build/test
                 }
             }
 
@@ -45,12 +39,10 @@ node {
             }
 
             stage('Deploy Locally') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    sh """
-                        docker rm -f dotnet_sample_container || true
-                        docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
-                    """
-                }
+                sh """
+                    docker rm -f dotnet_sample_container || true
+                    docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
+                """
             }
         } catch (err) {
             currentBuild.result = 'FAILURE'
