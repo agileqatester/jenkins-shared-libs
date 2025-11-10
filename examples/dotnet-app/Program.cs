@@ -1,12 +1,8 @@
-using System;
+var builder = WebApplication.CreateBuilder(args);
 
-namespace DotnetApp
-{
-    class Program
-    {
-        static void Main(string[] args)
-        {
-            Console.WriteLine("Hello from .NET Console App!");
-        }
-    }
-}
+var app = builder.Build();
+
+app.MapGet("/", () => Results.Ok("OK"));
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+app.Run();

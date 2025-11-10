@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 
-# --- Accept proxies from build args and set as ENV (used by dotnet restore) ---
+# Proxy args (as you had)
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
@@ -17,27 +17,25 @@ ENV http_proxy=${http_proxy} \
 
 WORKDIR /src
 
-# Copy only the project file first for better layer caching
+# Copy csproj only (improves caching)
 COPY examples/dotnet-app/DotnetApp.csproj examples/dotnet-app/
 
-# Restore packages (cache NuGet)
+# Restore
 RUN --mount=type=cache,target=/root/.nuget/packages \
     dotnet restore examples/dotnet-app/DotnetApp.csproj
 
-# Copy the rest of the source
+# Copy the rest
 COPY . .
 
-# Build/publish
+# Publish
 RUN --mount=type=cache,target=/root/.nuget/packages \
     dotnet publish examples/dotnet-app/DotnetApp.csproj -c Release -o /app/publish
 
-# ---- Runtime config (single-stage for demo) ----
+# Runtime (single-stage for simplicity)
 WORKDIR /app/publish
 
-# Bind Kestrel to port 80 in-container (default is 8080 in containers otherwise)
+# Listen on port 80 inside the container
 ENV ASPNETCORE_URLS=http://+:80
-
-# Document the port for clarity and tooling
 EXPOSE 80
 
-ENTRYPOINT ["dotnet", "DotnetApp.dll"]
+ENTRYPOINT ["dotnet","DotnetApp.dll"]
