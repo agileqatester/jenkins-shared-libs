@@ -200,42 +200,63 @@ node {
             stage('Deploy Locally') {
                 withEnv(["REPO=${repo}", "TAG=${tag}"]) {
 
-                docker.image(buildImage).inside('--add-host=host.docker.internal:host-gateway -v /var/run/docker.sock:/var/run/docker.sock') {
-                sh '''#!/usr/bin/env bash
-                    set -Eeuo pipefail
+                // Give the build container access to host Docker:
+                //  - Mount docker.sock
+                //  - Add the docker socket group GID (991) so non-root can use it
+                //  - Add host-gateway alias to reach published host ports from inside
+                def dockerArgs = '--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock ' +
+                                '--add-host=host.docker.internal:host-gateway'
 
-                    docker rm -f dotnet_sample_container || true
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh '''#!/usr/bin/env bash
+            set -Eeuo pipefail
 
-                    cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
-                    sleep 1
+            echo "==> Who am I and what are socket perms?"
+            id
+            ls -l /var/run/docker.sock || true
 
-                    mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
-                    if [[ -z "${mapped:-}" ]]; then
-                    echo "Failed to detect mapped port for 80/tcp"
-                    docker ps -a
-                    docker inspect dotnet_sample_container || true
-                    docker logs dotnet_sample_container || true
-                    exit 1
-                    fi
+            echo "==> Cleaning previous container if any"
+            docker rm -f dotnet_sample_container || true
 
-                    APP_URL="http://host.docker.internal:${mapped}"
-                    echo "APP_URL=${APP_URL}" | tee app_url.properties
+            echo "==> Starting app container and publishing container 80 to a RANDOM host port"
+            cid=$(docker run -d --name dotnet_sample_container -p 0:80 "${REPO}:${TAG}")
 
-                    for i in {1..30}; do
-                    if curl -fsS "${APP_URL}/" >/dev/null; then
-                        echo "App is responding at ${APP_URL}"
-                        break
-                    fi
-                    sleep 1
-                    if (( i == 30 )); then
-                        echo "App did not become ready in time"
-                        docker logs dotnet_sample_container || true
-                        exit 1
-                    fi
-                    done
-                    '''
+            # Tiny delay so port mapping is registered
+            sleep 1
+
+            echo "==> Discovering mapped host port for 80/tcp"
+            mapped=$(docker port dotnet_sample_container 80/tcp | awk -F: '{print $NF}')
+            if [[ -z "${mapped:-}" ]]; then
+            echo "Failed to detect mapped port for 80/tcp"
+            docker ps -a
+            docker inspect dotnet_sample_container || true
+            docker logs dotnet_sample_container || true
+            exit 1
+            fi
+
+            echo "Container ${cid} is mapped to host port: ${mapped}"
+
+            # We are inside the build container; use host.docker.internal (host-gateway alias)
+            APP_URL="http://host.docker.internal:${mapped}"
+            echo "APP_URL=${APP_URL}" | tee app_url.properties
+
+            echo "==> Probing readiness"
+            for i in {1..30}; do
+            if curl -fsS "${APP_URL}/" >/dev/null; then
+                echo "App is responding at ${APP_URL}"
+                break
+            fi
+            sleep 1
+            if (( i == 30 )); then
+                echo "App did not become ready in time"
+                docker logs dotnet_sample_container || true
+                exit 1
+            fi
+            done
+            '''
                 }
 
+                // Archive after inside{} so Jenkins can pick the file from workspace
                 archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
                 }
             }
