@@ -2,18 +2,27 @@ node {
     def repo       = 'agileqa/dotnet-sample'                  // Docker Hub repo for the APP image
     def tag        = env.IMAGE_TAG ?: 'latest'
 
-    def projDir    = 'examples/dotnet-app'                    // .NET project path (csproj lives here)
-    def dockerfile = 'examples/dotnet-app/Dockerfile'         // APP Dockerfile path
-    def buildCtx   = '.'                                      // Context '.' so Dockerfile can COPY from anywhere in repo
+    // .NET project path + APP Dockerfile
+    def projDir    = 'examples/dotnet-app'
+    def dockerfile = 'examples/dotnet-app/Dockerfile'
+    def buildCtx   = '.'                                      // allow Dockerfile to COPY from anywhere in repo
 
-    def buildImage = 'agileqa/jenkins-agent:multi-tool'       // Your agent image
+    def buildImage = 'agileqa/jenkins-agent:multi-tool'       // Jenkins agent image (toolbox)
 
-    // Host-side NuGet cache under workspace; mounted into the inner container for speed
-    def nugetCacheHost = "${env.WORKSPACE}/.nuget/packages"
-    sh "mkdir -p '${nugetCacheHost}' || true"
+    // Host-side NuGet home and its subdirs
+    def nugetHomeHost = "${env.WORKSPACE}/.nuget"
+    sh """
+      set -eux
+      mkdir -p '${nugetHomeHost}/packages'
+      mkdir -p '${nugetHomeHost}/NuGet'
+    """
 
-    // Mount Docker socket + NuGet cache; and keep docker group for socket permissions (GID 991 on your host)
-    def dockerArgs = "-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${nugetCacheHost}:/home/jenkins/.nuget/packages"
+    // Mount Docker socket + full ~/.nuget; keep docker group for socket permissions (GID 991 on your host)
+    def dockerArgs = """
+      -v /var/run/docker.sock:/var/run/docker.sock
+      --group-add 991
+      -v ${nugetHomeHost}:/home/jenkins/.nuget
+    """.trim().replaceAll("\\s+", " ")
 
     // .NET environment so first-time use doesn't write under /
     def dotnetEnv = [
@@ -31,12 +40,11 @@ node {
                 sh 'git rev-parse --short HEAD || true'
             }
 
-            // If your library is public, you can omit credentialsId
             stage('Load Shared Library') {
                 library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
                     $class: 'GitSCMSource',
                     remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
-                    credentialsId: 'git-agiletester'
+                    credentialsId: 'git-agiletester' // omit if public/unauth
                 ])
                 echo 'Shared library loaded.'
             }
@@ -45,23 +53,43 @@ node {
                 echo "Using build image: ${buildImage}"
             }
 
+            // (Optional) One-time fix if previous runs created ~/.nuget as root:
+            // docker.image(buildImage).inside("--user 0 ${dockerArgs}") {
+            //     sh 'chown -R 1000:1000 /home/jenkins/.nuget || true'
+            // }
+
             stage('Preflight') {
                 withEnv(dotnetEnv) {
                     docker.image(buildImage).inside(dockerArgs) {
                         sh """
                           set -eux
-                          whoami || true; id || true
+                          echo '=== Preflight ==='
+                          whoami || true
+                          id || true
                           echo HOME=\$HOME
-                          ls -l /var/run/docker.sock
-                          which docker; docker version
+
+                          # Ensure nuget dirs exist and are owned by current user
+                          mkdir -p /home/jenkins/.nuget/NuGet /home/jenkins/.nuget/packages
+                          chown -R \$(id -u):\$(id -g) /home/jenkins/.nuget || true
+                          ls -ld /home/jenkins /home/jenkins/.nuget /home/jenkins/.nuget/NuGet /home/jenkins/.nuget/packages
+
+                          # Docker access sanity
+                          ls -ln /var/run/docker.sock
+                          echo "Socket GID: \$(stat -c %g /var/run/docker.sock || stat -f %g /var/run/docker.sock || true)"
+                          which docker
+                          docker version
+
+                          # .NET SDK checks (net7 warning is OK; SDK 8 can build net7)
                           dotnet --info || true
                           dotnet --list-sdks || true
 
                           echo '== PWD =='; pwd
                           echo '== Top-level =='; ls -la
                           echo '== Project dir =='; ls -la ${projDir} || true
-                          echo '== App Dockerfile =='; test -f ${dockerfile}
+
                           test -d ${projDir}
+                          test -f ${dockerfile}
+                          echo '=== Preflight OK ==='
                         """
                     }
                 }
@@ -82,7 +110,8 @@ node {
             }
 
             stage('Docker Build & Push (App)') {
-                withEnv(dotnetEnv) {
+                // (Optional) speed up builds
+                withEnv(dotnetEnv + ["DOCKER_BUILDKIT=1"]) {
                     docker.image(buildImage).inside(dockerArgs) {
                         docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
                             def app = docker.build("${repo}:${tag}", "-f ${dockerfile} ${buildCtx}")
@@ -100,7 +129,8 @@ node {
                     sh """
                       set -eux
                       docker rm -f dotnet_sample_container || true
-                      # If your app is web listening on 80, this mapping works; otherwise adjust
+
+                      # If this is a console app, remove -p mapping; if it's an ASP.NET app listening on 80, keep it.
                       docker run -d --name dotnet_sample_container -p 8080:80 "${repo}:${tag}"
                     """
                 }
