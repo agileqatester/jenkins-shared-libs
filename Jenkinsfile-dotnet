@@ -1,11 +1,15 @@
-
 node {
+    def buildImage = 'agileqa/jenkins-agent:multi-tool'
     def repo       = 'agileqa/dotnet-sample'
     def tag        = env.IMAGE_TAG ?: 'latest'
     def buildCtx   = 'examples/dotnet-app'
-    def dockerArgs = '-v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.nuget/packages:/root/.nuget/packages'
 
-    def buildImage = null
+    // Use workspace-based NuGet cache to avoid $HOME ambiguity in nested containers
+    def nugetCache = "${env.WORKSPACE}/.nuget/packages"
+    sh "mkdir -p '${nugetCache}' || true"
+
+    // IMPORTANT: include socket mount + group-add 991 for Docker daemon access
+    def dockerArgs = "-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${nugetCache}:/root/.nuget/packages"
 
     timestamps {
         try {
@@ -17,31 +21,29 @@ node {
                 library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
                     $class: 'GitSCMSource',
                     remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
-                    credentialsId: 'git-agiletester'
+                    credentialsId: 'git-agiletester' // drop if repo is public and no creds needed
                 ])
                 echo 'Shared library loaded.'
             }
 
             stage('Init Agent') {
-                buildImage = 'agileqa/jenkins-agent:multi-tool'
                 echo "Using build image: ${buildImage}"
             }
 
-
             stage('Preflight') {
-                docker.image(buildImage).inside(dockerArgs) {
+                docker.image(buildImage).inside("--user 0 ${dockerArgs}") {
                     sh '''
-                    set -eux
-                    echo "=== Preflight checks ==="
-                    whoami
-                    id
-                    ls -l /var/run/docker.sock
-                    which docker
-                    docker version
-                    dotnet --info
-                    echo "Workspace: $PWD"
-                    test -d examples/dotnet-app
-                    test -f examples/dotnet-app/Dockerfile
+                      set -eux
+                      echo "=== Preflight checks ==="
+                      whoami
+                      id
+                      ls -l /var/run/docker.sock
+                      which docker
+                      docker version
+                      dotnet --info
+                      echo "Workspace: $PWD"
+                      test -d examples/dotnet-app
+                      test -f examples/dotnet-app/Dockerfile
                     '''
                 }
             }
@@ -49,8 +51,11 @@ node {
             stage('Build (.NET)') {
                 docker.image(buildImage).inside(dockerArgs) {
                     dir(buildCtx) {
-                        sh 'dotnet restore'
-                        sh 'dotnet build --configuration Release'
+                        sh '''
+                          set -eux
+                          dotnet restore
+                          dotnet build --configuration Release
+                        '''
                     }
                 }
             }
@@ -61,8 +66,7 @@ node {
                         def app = docker.build("${repo}:${tag}", buildCtx)
                         app.push()
                         if (tag != 'latest') {
-                            sh "docker tag ${repo}:${tag} ${repo}:latest"
-                            sh "docker push ${repo}:latest"
+                            sh "set -eux; docker tag ${repo}:${tag} ${repo}:latest; docker push ${repo}:latest"
                         }
                     }
                 }
@@ -71,8 +75,9 @@ node {
             stage('Deploy Locally') {
                 docker.image(buildImage).inside(dockerArgs) {
                     sh """
-                        docker rm -f dotnet_sample_container || true
-                        docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
+                      set -eux
+                      docker rm -f dotnet_sample_container || true
+                      docker run -d --name dotnet_sample_container -p 8080:80 ${repo}:${tag}
                     """
                 }
             }
@@ -80,14 +85,12 @@ node {
             currentBuild.result = 'FAILURE'
             echo "Pipeline failed: ${err}"
             throw err
-        } 
-        finally {
-        stage('Cleanup') {
-            docker.image(buildImage).inside(dockerArgs) {
-            sh 'docker image ls | head -n 20 || true'
+        } finally {
+            stage('Cleanup') {
+                docker.image(buildImage).inside(dockerArgs) {
+                    sh 'docker image ls | head -n 20 || true'
+                }
             }
-        }
         }
     }
 }
-
