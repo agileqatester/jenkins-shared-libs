@@ -142,144 +142,174 @@ node {
                 }
             }
 
-            stage('Docker Build & Push (App)') {
-                // Enable/disable BuildKit via parameter; optionally switch to buildx path
-                def bk = (params?.USE_BUILDKIT == null || params.USE_BUILDKIT) ? '1' : '0'
-                def useBuildx = (params?.USE_BUILDX == true)
+        stage('Docker Build & Push (App)') {
+        // BuildKit on unless explicitly disabled; buildx optional
+        def bk        = (params?.USE_BUILDKIT == null || params.USE_BUILDKIT) ? '1' : '0'
+        def useBuildx = (params?.USE_BUILDX == true)
 
-                withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=${bk}"]) {
-                    docker.image(buildImage).inside(dockerArgs) {
-                        withCredentials([usernamePassword(credentialsId: 'docker-hub-agileqa',
-                                                        usernameVariable: 'DOCKER_USER',
-                                                        passwordVariable: 'DOCKER_PASS')]) {
-                            sh """#!/usr/bin/env bash
-            set -Eeuo pipefail
+        // Create nuget.config for BuildKit secret (preferred: credentials; fallback: proxyEnv)
+        withCredentials([
+            string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
+            string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
+        ]) {
+            writeFile file: 'nuget.config', text: """<configuration>
+        <config>
+            <add key="http_proxy"  value="${PROXY_URL}"/>
+            <add key="https_proxy" value="${PROXY_URL}"/>
+            <add key="no_proxy"    value="${NO_PROXY_LIST}"/>
+        </config>
+        </configuration>
+        """
+        }
 
-            # Login (secure)
-            echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+        withEnv(dotnetEnv + proxyEnv + ["DOCKER_BUILDKIT=${bk}"]) {
+            docker.image(buildImage).inside(dockerArgs) {
+            withCredentials([usernamePassword(
+                credentialsId: 'docker-hub-agileqa',
+                usernameVariable: 'DOCKER_USER',
+                passwordVariable: 'DOCKER_PASS')]) {
 
-            # Compose proxy build args (only pass what exists)
-            proxyArgs=""
-            [[ -n "\${http_proxy:-}"  ]] && proxyArgs="\$proxyArgs --build-arg http_proxy=\$http_proxy"
-            [[ -n "\${https_proxy:-}" ]] && proxyArgs="\$proxyArgs --build-arg https_proxy=\$https_proxy"
-            [[ -n "\${no_proxy:-}"    ]] && proxyArgs="\$proxyArgs --build-arg no_proxy=\$no_proxy"
-            [[ -n "\${HTTP_PROXY:-}"  ]] && proxyArgs="\$proxyArgs --build-arg HTTP_PROXY=\$HTTP_PROXY"
-            [[ -n "\${HTTPS_PROXY:-}" ]] && proxyArgs="\$proxyArgs --build-arg HTTPS_PROXY=\$HTTPS_PROXY"
-            [[ -n "\${NO_PROXY:-}"    ]] && proxyArgs="\$proxyArgs --build-arg NO_PROXY=\$NO_PROXY"
+                // Build reference + (optional) fallback tag
+                if (!tag?.trim()) { tag = env.BUILD_NUMBER }
+                def fullRef = "${repo}:${tag}"
 
-            if [[ "${useBuildx}" == "true" ]]; then
-            # Ensure a builder exists and is active
-            docker buildx create --use --name jxbuilder || true
-            docker buildx inspect --bootstrap
+                sh '''#!/usr/bin/env bash
+        set -Eeuo pipefail
 
-            # Build with Buildx and LOAD into the local engine (needed for Deploy Locally)
-            docker buildx build --progress=plain --load \$proxyArgs \
-                -t ${repo}:${tag} \
-                -f ${dockerfile} ${buildCtx}
-            else
-            # Classic docker build (BuildKit on/off via DOCKER_BUILDKIT env)
-            docker build --progress=plain \$proxyArgs \
-                -t ${repo}:${tag} \
-                -f ${dockerfile} ${buildCtx}
-            fi
+        echo "==> Docker login (hub)"
+        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
 
-            # Push tags
-            docker push ${repo}:${tag}
-            if [[ "${tag}" != "latest" ]]; then
-            docker tag ${repo}:${tag} ${repo}:latest
-            docker push ${repo}:latest
-            fi
+        if [[ "''' + useBuildx.toString() + '''" == "true" ]]; then
+        echo "==> Using buildx with BuildKit (load into local engine)"
+        docker buildx create --use --name jxbuilder || true
+        docker buildx inspect --bootstrap
+        docker buildx build --progress=plain --load \
+            --secret id=nuget_config,src=nuget.config \
+            -t __FULL_REF__ \
+            -f __DOCKERFILE__ __BUILDCXT__
+        else
+        echo "==> Using classic docker build (BuildKit: ${DOCKER_BUILDKIT:-0})"
+        docker build --progress=plain \
+            --secret id=nuget_config,src=nuget.config \
+            -t __FULL_REF__ \
+            -f __DOCKERFILE__ __BUILDCXT__
+        fi
 
-            docker logout || true
-            """
-                        }
-                    }
-                }
+        echo "==> Pushing tag: __FULL_REF__"
+        docker push __FULL_REF__
+
+        if [[ "__TAG__" != "latest" ]]; then
+        echo "==> Tagging + pushing 'latest'"
+        docker tag __FULL_REF__ __REPO__:latest
+        docker push __REPO__:latest
+        fi
+
+        docker logout || true
+        '''  // <<< single-quoted heredoc kept
+        .replace('__FULL_REF__', fullRef)
+        .replace('__DOCKERFILE__', dockerfile)
+        .replace('__BUILDCXT__',  buildCtx)
+        .replace('__REPO__',      repo)
+        .replace('__TAG__',       tag)
+
+                // History gate (single quotes; inject fullRef at runtime)
+                sh '''
+                set -e
+                docker history __FULL_REF__ --no-trunc | tee history.txt
+                if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+                    echo 'ERROR: Proxy strings found in image history!' 1>&2
+                    exit 1
+                fi
+                '''.replace('__FULL_REF__', fullRef)
+
+                // Clean sensitive files
+                sh 'rm -f nuget.config history.txt || true'
             }
-            
-  stage('Deploy Locally') {
-    // If you already define repo/tag earlier in the pipeline, keep those.
-    withEnv([
-      "REPO=${repo}",
-      "TAG=${tag}"
-    ]) {
-      // Run docker CLI inside the build container with access to host Docker and host gateway
-      docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
-        sh '''#!/usr/bin/env bash
-set -Eeuo pipefail
+            }
+        }
+        }
+                    
+        stage('Deploy Locally') {
+        withEnv([
+            "REPO=${repo}",
+            "TAG=${tag}"
+        ]) {
+            docker.image(buildImage).inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
+            sh '''#!/usr/bin/env bash
+        set -Eeuo pipefail
 
-echo "==> Who am I and what are socket perms?"
-id
-ls -l /var/run/docker.sock || true
+        echo "==> Who am I and what are socket perms?"
+        id
+        ls -l /var/run/docker.sock || true
 
-echo "==> Using image: ${REPO}:${TAG}"
-IMG_ID=$(docker image inspect "${REPO}:${TAG}" --format '{{.Id}}')
-echo "${IMG_ID}"
+        echo "==> Using image: ${REPO}:${TAG}"
+        IMG_ID=$(docker image inspect "${REPO}:${TAG}" --format '{{.Id}}')
+        echo "${IMG_ID}"
 
-EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}')
-echo "ExposedPorts: ${EXPOSED}"
-if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
-  echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp" >&2
-  exit 1
-fi
+        EXPOSED=$(docker image inspect "${REPO}:${TAG}" --format '{{json .Config.ExposedPorts}}')
+        echo "ExposedPorts: ${EXPOSED}"
+        if [[ -z "${EXPOSED}" || "${EXPOSED}" == "null" || "${EXPOSED}" == "{}" || "${EXPOSED}" != *"80/tcp"* ]]; then
+        echo "ERROR: Image ${REPO}:${TAG} does not EXPOSE 80/tcp" 1>&2
+        exit 1
+        fi
 
-echo "==> Cleaning previous container if any"
-docker rm -f dotnet_sample_container || true
+        echo "==> Cleaning previous container if any"
+        docker rm -f dotnet_sample_container || true
 
-echo "==> Starting web container and publishing EXPOSEd ports (-P)"
-cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
+        echo "==> Starting web container and publishing EXPOSEd ports (-P)"
+        cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
 
-# Brief pause to ensure NetworkSettings.Ports populated
-sleep 1
+        # Brief pause to ensure NetworkSettings.Ports populated
+        sleep 1
 
-echo "==> docker ps:"
-docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+        echo "==> docker ps:"
+        docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
 
-echo "==> Getting mapped host port via docker inspect (single value)"
-mapped=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' dotnet_sample_container || true)
-mapped=$(printf "%s" "${mapped}" | tr -d '\\r\\n')
-if [[ -z "${mapped}" ]]; then
-  echo "ERROR: No public port found for 80/tcp" >&2
-  echo "Diagnostics:"
-  docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
-  docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
-  docker logs dotnet_sample_container || true
-  exit 1
-fi
-echo "==> Mapped host port: ${mapped}"
+        echo "==> Getting mapped host port via docker inspect (single value)"
+        mapped=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' dotnet_sample_container || true)
+        mapped=$(printf "%s" "${mapped}" | tr -d '\r\n')
+        if [[ -z "${mapped}" ]]; then
+        echo "ERROR: No public port found for 80/tcp" 1>&2
+        echo "Diagnostics:"
+        docker inspect dotnet_sample_container --format '{{json .HostConfig.PortBindings}}' || true
+        docker inspect dotnet_sample_container --format '{{json .NetworkSettings.Ports}}' || true
+        docker logs dotnet_sample_container || true
+        exit 1
+        fi
+        echo "==> Mapped host port: ${mapped}"
 
-# Inside the build container, reach host via host.docker.internal (added by --add-host)
-APP_URL="http://host.docker.internal:${mapped}"
-echo "APP_URL=${APP_URL}" | tee app_url.properties
-echo "APP_URL=${APP_URL}"
+        # From inside the build container, reach host via host.docker.internal
+        APP_URL="http://host.docker.internal:${mapped}"
+        echo "APP_URL=${APP_URL}" | tee app_url.properties
+        echo "APP_URL=${APP_URL}"
 
-echo "==> Probing readiness (try /health then /)"
-ready=0
-for i in {1..30}; do
-  if curl -fsS "${APP_URL}/health" >/dev/null 2>&1; then
-    echo "Health endpoint OK at ${APP_URL}/health"
-    ready=1
-    break
-  elif curl -fsS "${APP_URL}/" >/dev/null 2>&1; then
-    echo "Root endpoint OK at ${APP_URL}/"
-    ready=1
-    break
-  fi
-  sleep 1
-done
+        echo "==> Probing readiness (try /health then /)"
+        ready=0
+        for i in {1..30}; do
+        if curl -fsS "${APP_URL}/health" >/dev/null 2>&1; then
+            echo "Health endpoint OK at ${APP_URL}/health"
+            ready=1
+            break
+        elif curl -fsS "${APP_URL}/" >/dev/null 2>&1; then
+            echo "Root endpoint OK at ${APP_URL}/"
+            ready=1
+            break
+        fi
+        sleep 1
+        done
 
-if [[ "${ready}" -ne 1 ]]; then
-  echo "App did not become ready in time" >&2
-  docker logs dotnet_sample_container || true
-  exit 1
-fi
-'''
-      }
+        if [[ "${ready}" -ne 1 ]]; then
+        echo "App did not become ready in time" 1>&2
+        docker logs dotnet_sample_container || true
+        exit 1
+        fi
+        '''
+            }
 
-      // Archive after inside{} so Jenkins can collect from the workspace
-      archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
-    }
-  }
+            // Archive after inside{} so Jenkins can collect from the workspace
+            archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
+            }
+        }
 
         } catch (err) {
             currentBuild.result = 'FAILURE'
