@@ -257,7 +257,7 @@ node {
         docker rm -f dotnet_sample_container || true
 
         echo "==> Starting web container and publishing EXPOSEd ports (-P)"
-        cid=$(docker run -d --name dotnet_sample_container -P "${REPO}:${TAG}")
+        cid=$(docker run -d --cap-add NET_BIND_SERVICE --name dotnet_sample_container -P "${REPO}:${TAG}")
 
         # Brief pause to ensure NetworkSettings.Ports populated
         sleep 1
