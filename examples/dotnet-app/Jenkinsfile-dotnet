@@ -42,13 +42,16 @@ node {
                 )
             }
 
+
             stage('Build (.NET)') {
                 dotnetBuild(
                     image: buildImage,
                     dockerArgs: dockerArgs,
-                    envVars: proxyEnv
+                    envVars: proxyEnv,
+                    workDir: projDir
                 )
             }
+
 
             stage('Docker Build & Push') {
                 dockerBuildPush(
