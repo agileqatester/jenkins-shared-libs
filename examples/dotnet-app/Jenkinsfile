@@ -31,22 +31,34 @@ node {
       }
     }
 
-    stage('Build image (no proxy in history)') {
-      withEnv(['DOCKER_BUILDKIT=1']) {
-        env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
-        def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
+stage('Build image (no proxy in history)') {
+  withEnv(['DOCKER_BUILDKIT=1']) {
+    sh 'docker info | sed -n "s/^ BuildKit: //p" || true'  // shows true/false
 
-        def buildArgs = """--secret id=nuget_config,src=nuget.config \\
-                           -f examples/dotnet-app/Dockerfile ."""
+    env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
+    def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
 
-        def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
+    def buildArgs = "--progress=plain --secret id=nuget_config,src=nuget.config -f examples/dotnet-app/Dockerfile ."
 
-        if (params.PUBLISH_IMAGE) {
-          docker.withRegistry('', 'docker-hub-agileqa') {
-            img.push(tag)
-            img.push('latest')
-          }
-        }
+    def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
+
+    if (params.PUBLISH_IMAGE) {
+      docker.withRegistry('', 'docker-hub-agileqa') {
+        img.push(tag); img.push('latest')
+      }
+    }
+
+    sh '''
+      set -e
+      docker history ${IMAGE_NAME}:${tag} --no-trunc | tee history.txt
+      if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+        echo 'ERROR: Proxy strings found in image history!' >&2
+        exit 1
+      fi
+    '''
+  }
+}
+
 
         // Fail fast if history contains any proxy strings
         sh """
