@@ -1,0 +1,68 @@
+@Library('jenkins-shared-libs') _  // optional if you use your shared steps
+
+properties([
+  parameters([
+    string(name: 'IMAGE_NAME', defaultValue: 'agileqa/dotnet-sample', description: 'repo/name'),
+    string(name: 'IMAGE_TAG',  defaultValue: '',                      description: 'leave empty to use short SHA'),
+    booleanParam(name: 'PUBLISH_IMAGE', defaultValue: true, description: 'Push after build')
+  ])
+])
+
+node {
+  timestamps(); wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
+
+    stage('Checkout') {
+      checkout scm
+    }
+
+    stage('Prep NuGet proxy (secret file)') {
+      withCredentials([
+        string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
+        string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
+      ]) {
+        writeFile file: 'nuget.config', text: """<configuration>
+  <config>
+    <add key=\"http_proxy\"  value=\"${PROXY_URL}\"/>
+    <add key=\"https_proxy\" value=\"${PROXY_URL}\"/>
+    <add key=\"no_proxy\"    value=\"${NO_PROXY_LIST}\"/>
+  </config>
+</configuration>
+"""
+      }
+    }
+
+    stage('Build image (no proxy in history)') {
+      withEnv(['DOCKER_BUILDKIT=1']) {
+        env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
+        def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
+
+        def buildArgs = """--secret id=nuget_config,src=nuget.config \\
+                           -f examples/dotnet-app/Dockerfile ."""
+
+        def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
+
+        if (params.PUBLISH_IMAGE) {
+          docker.withRegistry('', 'docker-hub-agileqa') {
+            img.push(tag)
+            img.push('latest')
+          }
+        }
+
+        // Fail fast if history contains any proxy strings
+        sh '''
+          set -e
+          docker history ${IMAGE_NAME}:${tag} --no-trunc | tee history.txt
+          if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+            echo 'ERROR: Proxy strings found in image history!' >&2
+            exit 1
+          fi
+        '''
+      }
+    }
+
+    stage('Cleanup') {
+      sh "rm -f nuget.config history.txt || true"
+    }
+  }
+}
+

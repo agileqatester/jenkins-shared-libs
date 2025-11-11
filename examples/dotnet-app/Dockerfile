@@ -1,41 +1,17 @@
 # syntax=docker/dockerfile:1.7
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-
-# Proxy args (as you had)
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ENV http_proxy=${http_proxy} \
-    https_proxy=${https_proxy} \
-    no_proxy=${no_proxy} \
-    HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
-    NO_PROXY=${NO_PROXY}
-
 WORKDIR /src
 
-# Copy csproj only (improves caching)
-COPY examples/dotnet-app/DotnetApp.csproj examples/dotnet-app/
+# Copy project file first (cache-friendly)
+COPY examples/dotnet-app/DotnetApp.csproj ./DotnetApp.csproj
 
-# Restore
-RUN --mount=type=cache,target=/root/.nuget/packages \
-    dotnet restore examples/dotnet-app/DotnetApp.csproj
+# Use BuildKit secret mount for NuGet proxy config (never persisted in layers)
+RUN --mount=type=secret,id=nuget_config,target=/root/.nuget/NuGet/NuGet.Config \
+    --mount=type=cache,id=nuget,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore DotnetApp.csproj --nologo
 
-# Copy the rest
-COPY . .
+# Copy the rest and publish
+COPY examples/dotnet-app/ ./
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages,sharing=locked \
+    dotnet publish DotnetApp.csproj -c Release -o /app/publish --nologo
 
-# Publish
-RUN --mount=type=cache,target=/root/.nuget/packages \
-    dotnet publish examples/dotnet-app/DotnetApp.csproj -c Release -o /app/publish
-
-# Runtime (single-stage for simplicity)
-WORKDIR /app/publish
-
-# Listen on port 80 inside the container
-ENV ASPNETCORE_URLS=http://+:80
-EXPOSE 80
-
-ENTRYPOINT ["dotnet","DotnetApp.dll"]
