@@ -3,7 +3,7 @@ def call(Map cfg = [:]) {
     String containerName = cfg.containerName ?: 'dotnet_sample_container'
 
     docker.image('agileqa/jenkins-agent:multi-tool').inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
-        sh """
+        sh '''
           set -eux
           docker rm -f ${containerName} || true
           cid=$(docker run -d --cap-add NET_BIND_SERVICE --name ${containerName} -P ${image})
@@ -15,7 +15,7 @@ def call(Map cfg = [:]) {
             if curl -fsS "${APP_URL}/health" >/dev/null 2>&1; then break; fi
             sleep 1
           done
-        """
+        '''
     }
     archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
 }
