@@ -10,18 +10,19 @@ properties([
 
 node {
   timestamps { 
-    wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
+  wrap([$class: 'AnsiColorBuildWrapper', colorMapName: 'xterm']) {
 
-      stage('Checkout') {
-        checkout scm
-      }
+    stage('Checkout') {
+      checkout scm
+    }
 
-      stage('Prep NuGet proxy (secret file)') {
-        withCredentials([
-          string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
-          string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
-        ]) {
-          writeFile file: 'nuget.config', text: """<configuration>
+    stage('Prep NuGet proxy (secret file)') {
+      withCredentials([
+        string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
+        string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
+      ]) {
+        // WRITE REAL XML, not HTML-escaped
+        writeFile file: 'nuget.config', text: """<configuration>
   <config>
     <add key="http_proxy"  value="${PROXY_URL}"/>
     <add key="https_proxy" value="${PROXY_URL}"/>
@@ -29,44 +30,49 @@ node {
   </config>
 </configuration>
 """
-        }
-      }
-
-      stage('Build image (no proxy in history)') {
-        withEnv(['DOCKER_BUILDKIT=1']) {
-          // (Optional) Diagnostic to confirm BuildKit
-          sh 'docker info | sed -n "s/^ BuildKit: //p" || true'
-
-          env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
-          def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
-
-          // Keep args on one line to avoid parsing issues
-          def buildArgs = "--progress=plain --secret id=nuget_config,src=nuget.config -f examples/dotnet-app/Dockerfile ."
-
-          def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
-
-          if (params.PUBLISH_IMAGE) {
-            docker.withRegistry('', 'docker-hub-agileqa') {
-              img.push(tag)
-              img.push('latest')
-            }
-          }
-
-          // Single history check (note single quotes so Groovy doesn't expand ${} here)
-          sh '''
-            set -e
-            docker history ${IMAGE_NAME}:${tag} --no-trunc | tee history.txt
-            if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
-              echo 'ERROR: Proxy strings found in image history!' 1>&2
-              exit 1
-            fi
-          '''
-        }
-      }
-
-      stage('Cleanup') {
-        sh 'rm -f nuget.config history.txt || true'
       }
     }
+
+    stage('Build image (no proxy in history)') {
+      withEnv(['DOCKER_BUILDKIT=1']) {
+        // Diagnostic: confirm BuildKit on this node (prints 'true' or nothing)
+        sh 'docker info | sed -n "s/^ BuildKit: //p" || true'
+
+        env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
+
+        def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
+        if (!tag) { tag = env.BUILD_NUMBER }  // optional fallback
+
+        def fullRef = "${params.IMAGE_NAME}:${tag}"
+
+        // Single-line args to avoid Groovy parsing issues
+        def buildArgs = "--progress=plain --secret id=nuget_config,src=nuget.config -f examples/dotnet-app/Dockerfile ."
+
+        def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
+
+        if (params.PUBLISH_IMAGE) {
+          docker.withRegistry('', 'docker-hub-agileqa') {
+            img.push(tag)
+            img.push('latest')
+          }
+        }
+
+        // History gate with literal heredoc and runtime replacement
+        sh '''
+          set -e
+          docker history __FULL_REF__ --no-trunc | tee history.txt
+          if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+            echo 'ERROR: Proxy strings found in image history!' 1>&2
+            exit 1
+          fi
+        '''.replace('__FULL_REF__', fullRef)
+      }
+    }
+
+
+    stage('Cleanup') {
+      sh 'rm -f nuget.config history.txt || true'
+    }
   }
+}
 }
