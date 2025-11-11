@@ -19,13 +19,13 @@ def call(Map cfg = [:]) {
                     docker buildx create --use --name jxbuilder || true
                     docker buildx inspect --bootstrap
                     docker buildx build --progress=plain --load \
-                        ${secretFiles.collect { "--secret id=${it},src=${it}" }.join(' ')} \
+                        ${secretFiles.collect { "--secret id=${it.replace('.','_')},src=${it}" }.join(' ')} \
                         -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
                 """
             } else {
                 sh """
                     docker build --progress=plain \
-                        ${secretFiles.collect { "--secret id=${it},src=${it}" }.join(' ')} \
+                        ${secretFiles.collect { "--secret id=${it.replace('.','_')},src=${it}" }.join(' ')} \
                         -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
                 """
             }
