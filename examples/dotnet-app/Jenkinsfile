@@ -1,4 +1,4 @@
-@Library('jenkins-shared-libs') _  // optional if you use your shared steps
+//@Library('jenkins-shared-libs') _  // optional if you use your shared steps
 
 properties([
   parameters([
