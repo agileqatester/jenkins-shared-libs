@@ -1,16 +1,27 @@
-def call() {
-    withCredentials([
-        string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
-        string(credentialsId: 'corp-no-proxy', variable: 'NO_PROXY_LIST')
-    ]) {
-        writeFile file: 'nuget.config', text: """<configuration>
-    <config>
-        <add key="http_proxy"  value="${PROXY_URL}"/>
-        <add key="https_proxy" value="${PROXY_URL}"/>
-        <add key="no_proxy"    value="${NO_PROXY_LIST}"/>
-    </config>
-</configuration>
-"""
+def call(Map cfg = [:]) {
+    String image      = cfg.image ?: error("[preflightCheck] 'image' required")
+    String dockerArgs = cfg.dockerArgs ?: ''
+    String workDir    = cfg.workDir ?: '.'
+
+    docker.image(image).inside(dockerArgs) {
+        dir(workDir) {
+            sh """
+              set -eux
+              echo '=== Preflight ==='
+              whoami; id
+              echo "Workspace: $(pwd)"
+              echo "Listing project directory:"
+              ls -la
+              echo "Checking Docker client:"
+              docker version || true
+              echo "Checking Buildx:"
+              docker buildx version || true
+              echo "Checking .NET SDK:"
+              dotnet --info || true
+              echo "Checking NuGet connectivity:"
+              curl -I --max-time 20 https://api.nuget.org/v3/index.json || true
+              echo '=== Preflight OK ==='
+            """
+        }
     }
-    echo "[prepareNugetConfig] nuget.config created for BuildKit secret."
 }
