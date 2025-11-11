@@ -5,9 +5,9 @@ def call(Map cfg = [:]) {
 
     docker.image(image).inside(dockerArgs) {
         dir(workDir) {
-            sh """
+            sh '''
               set -eux
-              echo '=== Preflight ==='
+              echo "=== Preflight ==="
               whoami; id
               echo "Workspace: $(pwd)"
               echo "Listing project directory:"
@@ -20,8 +20,8 @@ def call(Map cfg = [:]) {
               dotnet --info || true
               echo "Checking NuGet connectivity:"
               curl -I --max-time 20 https://api.nuget.org/v3/index.json || true
-              echo '=== Preflight OK ==='
-            """
+              echo "=== Preflight OK ==="
+            '''
         }
     }
 }
