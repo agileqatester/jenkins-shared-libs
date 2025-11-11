@@ -49,14 +49,14 @@ node {
         }
 
         // Fail fast if history contains any proxy strings
-        sh '''
+        sh """
           set -e
           docker history ${IMAGE_NAME}:${tag} --no-trunc | tee history.txt
           if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
             echo 'ERROR: Proxy strings found in image history!' >&2
             exit 1
           fi
-        '''
+        """
       }
     }
 
@@ -65,4 +65,3 @@ node {
     }
   }
 }
-
