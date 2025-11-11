@@ -7,4 +7,4 @@ def call() {
     if (env.HTTPS_PROXY) proxyEnv << "HTTPS_PROXY=${env.HTTPS_PROXY}"
     if (env.NO_PROXY)    proxyEnv << "NO_PROXY=${env.NO_PROXY}"
     return proxyEnv
-
+}
