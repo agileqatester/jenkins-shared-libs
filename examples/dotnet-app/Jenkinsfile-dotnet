@@ -1,96 +1,29 @@
 @Library('jenkins-shared-library@main') _
 node {
-    // --- Pipeline parameters ---
     properties([parameters([
-        booleanParam(name: 'USE_BUILDKIT', defaultValue: true, description: 'Enable Docker BuildKit'),
-        booleanParam(name: 'USE_BUILDX', defaultValue: false, description: 'Use docker buildx explicitly')
+        booleanParam(name: 'USE_BUILDKIT', defaultValue: true),
+        booleanParam(name: 'USE_BUILDX', defaultValue: false)
     ])])
 
-    // === Image + App configuration ===
-    def buildImage    = selectAgent('dotnet') // agileqa/jenkins-agent:multi-tool
+    def buildImage    = selectAgent('dotnet')
     def repo          = 'agileqa/dotnet-sample'
     def tag           = env.IMAGE_TAG ?: 'latest'
     def projDir       = 'examples/dotnet-app'
     def dockerfile    = "${projDir}/Dockerfile"
     def buildCtx      = '.'
-
-    // NuGet host-side cache
     def nugetHomeHost = "${env.WORKSPACE}/.nuget"
     def dockerArgs    = nugetDockerArgs(nugetHomeHost: nugetHomeHost)
+    def proxyEnv      = collectProxyEnv()
 
-    // Proxy env collection
-    def proxyEnv = []
-    if (env.http_proxy)  proxyEnv << "http_proxy=${env.http_proxy}"
-    if (env.https_proxy) proxyEnv << "https_proxy=${env.https_proxy}"
-    if (env.no_proxy)    proxyEnv << "no_proxy=${env.no_proxy}"
-    if (env.HTTP_PROXY)  proxyEnv << "HTTP_PROXY=${env.HTTP_PROXY}"
-    if (env.HTTPS_PROXY) proxyEnv << "HTTPS_PROXY=${env.HTTPS_PROXY}"
-    if (env.NO_PROXY)    proxyEnv << "NO_PROXY=${env.NO_PROXY}"
-
-    timestamps {
-        try {
-            stage('Checkout') {
-                // Restore original behavior for multibranch jobs
-                checkout scm
-            }
-
-            stage('NuGet Prep') {
-                dotnetNugetPrep(
-                    image: buildImage,
-                    dockerArgs: dockerArgs,
-                    nugetHomeHost: nugetHomeHost
-                )
-            }
-
-            stage('Prepare NuGet Config') {
-                withCredentials([
-                    string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
-                    string(credentialsId: 'corp-no-proxy', variable: 'NO_PROXY_LIST')
-                ]) {
-                    writeFile file: 'nuget.config', text: """<configuration>
-                <config>
-                    <add key="http_proxy"  value="${PROXY_URL}"/>
-                    <add key="https_proxy" value="${PROXY_URL}"/>
-                    <add key="no_proxy"    value="${NO_PROXY_LIST}"/>
-                </config>
-            </configuration>
-            """
-                }
-            }
-
-
-            stage('Build (.NET)') {
-                dotnetBuild(
-                    image: buildImage,
-                    dockerArgs: dockerArgs,
-                    envVars: proxyEnv,
-                    workDir: projDir
-                )
-            }
-
-
-            stage('Docker Build & Push') {
-                dockerBuildPush(
-                    image: repo,
-                    tag: tag,
-                    dockerfile: dockerfile,
-                    context: buildCtx,
-                    useBuildx: params.USE_BUILDX,
-                    useBuildKit: params.USE_BUILDKIT,
-                    proxyEnv: proxyEnv,
-                    secretFiles: ['nuget.config']
-                )
-            }
-        } catch (err) {
-            currentBuild.result = 'FAILURE'
-            echo "Pipeline failed: ${err}"
-            throw err
-        } finally {
-            stage('Cleanup') {
-                docker.image(buildImage).inside(dockerArgs) {
-                    sh 'docker image ls | head -n 20 || true'
-                }
-            }
-        }
+    stage('Checkout') { checkout scm }
+    stage('Preflight') { preflightCheck(image: buildImage, dockerArgs: dockerArgs, workDir: projDir) }
+    stage('NuGet Prep') { dotnetNugetPrep(image: buildImage, dockerArgs: dockerArgs, nugetHomeHost: nugetHomeHost) }
+    stage('Prepare NuGet Config') { prepareNugetConfig() }
+    stage('Build (.NET)') { dotnetBuild(image: buildImage, dockerArgs: dockerArgs, envVars: proxyEnv, workDir: projDir) }
+    stage('Docker Build & Push') {
+        dockerBuildPush(image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
+                        useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
+                        proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
     }
+    stage('Deploy Locally') { deployContainer(image: "${repo}:${tag}") }
 }
