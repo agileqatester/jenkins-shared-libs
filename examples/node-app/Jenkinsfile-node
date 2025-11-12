@@ -1,13 +1,11 @@
 @Library('jenkins-shared-library@main') _
 
 /**
- * Node.js pipeline using the multi-tool agent (Docker-in-Docker via host socket).
- * Reuses shared library primitives and avoids proxy leakage in Docker image history.
- *
- * Repos & paths:
- *   - Image repo: agileqa/node-sample
- *   - Workdir   : examples/node-app
- *   - Dockerfile: examples/node-app/Dockerfile
+ * Node.js pipeline (Declarative + hybrid)
+ * - Runs inside agileqa/jenkins-agent:multi-tool (Docker socket mounted)
+ * - Single proxy param: HTTP_PROXY; applied to both HTTP & HTTPS
+ * - NO_PROXY is not asked; defaults to localhost,127.0.0.1; cleared only for npm step
+ * - Proxy never baked into Docker image (same guardrails as .NET)
  */
 
 // Shared/hybrid state
@@ -18,16 +16,14 @@ def projDir         = 'examples/node-app'
 def dockerfile      = ''
 def buildCtx        = '.'
 def npmCacheHost    = ''
-def innerDockerArgs = '' // used by preflightCheck's inside()
+def innerDockerArgs = ''  // for preflightCheck's inside()
 
 pipeline {
     agent {
         docker {
             image 'agileqa/jenkins-agent:multi-tool'
-            // IMPORTANT:
-            //  - Mount Docker socket to use host daemon
-            //  - Add the host docker group GID (change 991 if your host differs)
-            //  - Add public DNS resolvers for learning environment; replace with corp DNS if required
+            // Mount Docker socket, add docker group GID (change 991 if your host differs),
+            // and public DNS fallback for learning env (replace with corp DNS if policy requires).
             args  '-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 --dns 8.8.8.8 --dns 1.1.1.1'
             reuseNode true
         }
@@ -40,27 +36,29 @@ pipeline {
     }
 
     parameters {
-        // Build system toggles
+        // Build toggles (parity with .NET)
         booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
         booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override (defaults to "latest")')
 
-        // Proxy inputs: set them via job parameters, or leave blank to pick from Jenkins global env.
-        string(name: 'HTTP_PROXY',  defaultValue: '', description: 'http://user:pass@proxy-host:port (or http://proxy-host:port)')
-        string(name: 'HTTPS_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port (often same as HTTP_PROXY)')
-        string(name: 'NO_PROXY',    defaultValue: '', description: 'e.g. localhost,127.0.0.1,.corp.local')
+        // **Only one proxy input**; we’ll apply it to both HTTP and HTTPS internally.
+        string(name: 'HTTP_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port (or http://proxy-host:port)')
     }
 
-    // Ensure proxy variables exist inside the agent container (Declarative env applies to agent)
+    // Make proxy env available INSIDE the agent container
     environment {
         DOCKERHUB_REPO = 'agileqa/node-sample'
 
-        // Prefer job params; fallback to Jenkins global env if defined
+        // Prefer job param; fallback to Jenkins global env if defined
         HTTP_PROXY  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        HTTPS_PROXY = "${params.HTTPS_PROXY ?: env.HTTPS_PROXY ?: ''}"
-        NO_PROXY    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
 
-        // Lowercase variants for tools which expect them
+        // Apply the same value to HTTPS as requested
+        HTTPS_PROXY = "${HTTP_PROXY}"
+
+        // Minimal NO_PROXY; not a parameter (keeps prompts clean)
+        NO_PROXY    = 'localhost,127.0.0.1'
+
+        // Lowercase variants for tools that expect them
         http_proxy  = "${HTTP_PROXY}"
         https_proxy = "${HTTPS_PROXY}"
         no_proxy    = "${NO_PROXY}"
@@ -74,16 +72,22 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    proxyEnv    = collectProxyEnv() // pulls both lower/upper case into a list for withEnv
+                    // Collects HTTP(S)_PROXY / NO_PROXY from the agent env we set above
+                    proxyEnv    = collectProxyEnv()
                     tag         = env.IMAGE_TAG?.trim() ? env.IMAGE_TAG.trim() : 'latest'
                     dockerfile  = "${projDir}/Dockerfile"
 
-                    // npm cache for faster builds
+                    // npm cache for faster installs
                     npmCacheHost = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
 
-                    // For preflightCheck: ensure inner container has Docker socket, group, npm cache, and DNS
+                    // For preflight inner container: socket, docker group, npm cache, DNS
                     innerDockerArgs = "-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${npmCacheHost}:/home/node/.npm --dns 8.8.8.8 --dns 1.1.1.1"
+
+                    // Quick visibility (non-sensitive)
+                    echo "HTTP_PROXY=${env.HTTP_PROXY ?: ''}"
+                    echo "HTTPS_PROXY=${env.HTTPS_PROXY ?: ''}"
+                    echo "NO_PROXY=${env.NO_PROXY ?: ''}"
                 }
             }
         }
@@ -91,12 +95,12 @@ pipeline {
         stage('Preflight') {
             steps {
                 script {
-                    // Make curl/node checks proxy-aware in preflight
+                    // Make curl/node checks proxy-aware
                     withEnv(proxyEnv) {
                         preflightCheck(
-                            image: 'agileqa/jenkins-agent:multi-tool',
+                            image     : 'agileqa/jenkins-agent:multi-tool',
                             dockerArgs: innerDockerArgs,
-                            workDir: projDir
+                            workDir   : projDir
                         )
                     }
                 }
@@ -106,7 +110,7 @@ pipeline {
         stage('Build (Node)') {
             steps {
                 script {
-                    // Use proxy env; clear NO_PROXY only here so npm doesn't bypass proxy to public registry
+                    // Use proxy env; clear NO_PROXY just here so npm does NOT bypass the proxy for public registry
                     withEnv(proxyEnv + ['NO_PROXY=', 'no_proxy=']) {
                         dir(projDir) {
                             sh '''
@@ -114,7 +118,7 @@ pipeline {
                               echo "== proxies in env (for npm) =="
                               env | grep -i proxy || true
 
-                              # Configure npm to use HTTP/HTTPS proxy explicitly if present
+                              # Configure npm to use proxy explicitly if present
                               if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
                               if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
                               npm config delete noproxy || true
@@ -124,9 +128,9 @@ pipeline {
                               npm config get proxy || true
                               npm config get https-proxy || true
                               npm config get noproxy || true
-
-                              # Optional quick probe
-                              (command -v curl >/dev/null 2>&1 && curl -I --max-time 10 https://registry.npmjs.org) || true
+                              env | grep -i proxy || true
+npm config list
+curl -I --max-time 10 https://registry.npmjs.org || true
                             '''
                             // Shared lib: npm install && npm run build
                             runBuild('node')
@@ -139,7 +143,7 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 script {
-                    // Safe: proxy is provided as runtime env only, not as build-args; history scan prevents leaks
+                    // Safe: proxy provided as runtime env only, not as build-args; your history scan prevents leaks
                     dockerBuildPush(
                         image       : repo,
                         tag         : tag,
@@ -157,8 +161,8 @@ pipeline {
         stage('Deploy Locally') {
             steps {
                 script {
-                    // Assumes Node image exposes port 80 and /health. If your app uses 3000,
-                    // I can extend deployContainer to accept ports & healthPath.
+                    // Assumes image listens on port 80 and exposes /health.
+                    // If your app uses 3000, I can extend deployContainer to accept ports & healthPath.
                     deployContainer(image: "${repo}:${tag}", containerName: 'node_sample_container')
                 }
             }
