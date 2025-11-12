@@ -81,14 +81,45 @@ pipeline {
 stage('Build (Node)') {
     steps {
         script {
-            withEnv(proxyEnv) {
+            // Apply proxy env but explicitly clear NO_PROXY to avoid bypassing the proxy for npmjs.org
+            withEnv(proxyEnv + ['NO_PROXY=', 'no_proxy=']) {
                 dir(projDir) {
                     sh '''
                       set -eux
+                      # Configure npm to use the proxy if provided
                       if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
                       if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
+
+                      # Ensure npm doesn't bypass the proxy
+                      npm config delete noproxy || true
+                      npm config set noproxy "" || true
+
+                      echo "== npm proxy config =="
+                      npm config get proxy || true
+                      npm config get https-proxy || true
+                      npm config get noproxy || true
+
+                      echo "== quick connectivity checks =="
+                      node --version
+                      npm --version
+                      # This uses proxy if env is set; it's OK if it fails, just for visibility
+                      (command -v curl >/dev/null 2>&1 && curl -I --max-time 15 https://registry.npmjs.org) || true
                     '''
-                    runBuild('node') // npm install && npm run build
+                    // Shared lib: runs `npm install && npm run build`
+                    sh '''
+                    echo "== Env proxies =="
+                    env | grep -i proxy || true
+
+                    echo "== DNS test (should succeed or go via proxy) =="
+                    getent hosts registry.npmjs.org || nslookup registry.npmjs.org || dig +short registry.npmjs.org || true
+
+                    echo "== npm ping (uses npm config) =="
+                    npm ping || true
+
+                    echo "== npm config list =="
+                    npm config list
+                    '''
+                    runBuild('node')
                 }
             }
         }
