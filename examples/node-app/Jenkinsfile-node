@@ -78,14 +78,22 @@ pipeline {
             }
         }
 
-        stage('Build (Node)') {
-            steps {
+stage('Build (Node)') {
+    steps {
+        script {
+            withEnv(proxyEnv) {
                 dir(projDir) {
-                    // Shared library: npm install && npm run build
-                    runBuild('node')
+                    sh '''
+                      set -eux
+                      if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
+                      if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
+                    '''
+                    runBuild('node') // npm install && npm run build
                 }
             }
         }
+    }
+}
 
         stage('Docker Build & Push') {
             steps {
