@@ -2,10 +2,9 @@
 
 /**
  * Node.js Declarative pipeline (hybrid) reusing shared library steps.
- * Repos & paths:
- *   - Image repo: agileqa/node-sample
- *   - Workdir   : examples/node-app
- *   - Dockerfile: examples/node-app/Dockerfile
+ * Repo/Image: agileqa/node-sample
+ * Workdir   : examples/node-app
+ * Dockerfile: examples/node-app/Dockerfile
  */
 
 def proxyEnv     = [:]
@@ -29,8 +28,8 @@ pipeline {
 
     parameters {
         booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
-        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch builder)')
-        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional image tag override (defaults to "latest")')
+        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx for multi-arch')
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override for image tag (defaults to "latest")')
     }
 
     environment {
@@ -47,17 +46,18 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    nodeImage  = selectAgent('node')   // shared lib: returns a Node-capable agent image
-                    proxyEnv   = collectProxyEnv()     // shared lib: returns proxy env list for withEnv
+                    // Select Node.js-capable agent image (per your vars/selectAgent.groovy)
+                    nodeImage  = selectAgent('nodejs')   // returns e.g. node:20
+                    proxyEnv   = collectProxyEnv()       // proxy env list for withEnv in dockerBuildPush
 
                     tag        = env.IMAGE_TAG?.trim() ? env.IMAGE_TAG.trim() : 'latest'
                     dockerfile = "${projDir}/Dockerfile"
 
-                    // Local npm cache to speed up npm install/ci during build steps inside docker
+                    // Setup npm cache host directory for speed
                     npmCacheHost = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
 
-                    // If you later add npmDockerArgs(...) to your library, swap this for that helper
+                    // Volume mount the npm cache into the container
                     dockerArgs = "-v ${npmCacheHost}:/home/node/.npm"
                 }
             }
@@ -66,8 +66,7 @@ pipeline {
         stage('Preflight') {
             steps {
                 script {
-                    // NOTE: preflightCheck currently prints .NET info; harmless here but you may want to
-                    // extend it to probe Node (e.g., node --version, npm --version) for better signals.
+                    // Your current preflight prints .NET/NuGet; harmless but you may add Node/npm checks in the future.
                     preflightCheck(image: nodeImage, dockerArgs: dockerArgs, workDir: projDir)
                 }
             }
@@ -77,7 +76,7 @@ pipeline {
             steps {
                 script {
                     dir(projDir) {
-                        // shared lib runBuild('node') => `npm install && npm run build`
+                        // Shared lib: for 'node' => "npm install && npm run build"
                         runBuild('node')
                     }
                 }
@@ -95,7 +94,7 @@ pipeline {
                         useBuildx   : params.USE_BUILDX,
                         useBuildKit : params.USE_BUILDKIT,
                         proxyEnv    : proxyEnv
-                        // secretFiles: ['.npmrc'] // enable if you add a private registry file
+                        // secretFiles: ['.npmrc'] // uncomment if you add a private registry token file
                     )
                 }
             }
@@ -103,10 +102,14 @@ pipeline {
 
         stage('Deploy Locally') {
             steps {
-                script {
-                    // Your deployContainer defaults containerName to 'dotnet_sample_container' and expects port 80.
-                    // Override the name for Node; ensure your Node image listens on 80 or adjust the helper to support ports.
-                    deployContainer(image: "${repo}:${tag}", containerName: 'node_sample_container')
+                script {              
+                    deployContainer(
+                    image: "${repo}:${tag}",
+                    containerName: 'node_sample_container',
+                    ports: '3000:3000',
+                    healthPath: '/health'
+                    )
+
                 }
             }
         }
