@@ -1,24 +1,32 @@
 @Library('jenkins-shared-library@main') _
 
 /**
- * Node.js Declarative pipeline (hybrid) reusing shared library steps.
- * Repo/Image: agileqa/node-sample
- * Workdir   : examples/node-app
- * Dockerfile: examples/node-app/Dockerfile
+ * Node.js pipeline using the multi-tool agent for ALL stages.
+ * Image: agileqa/jenkins-agent:multi-tool (must include docker, node, npm)
+ * App repo & paths:
+ *   - Image repo: agileqa/node-sample
+ *   - Workdir   : examples/node-app
+ *   - Dockerfile: examples/node-app/Dockerfile
  */
 
 def proxyEnv     = [:]
-def nodeImage    = ''
 def repo         = 'agileqa/node-sample'
 def tag          = ''
 def projDir      = 'examples/node-app'
 def dockerfile   = ''
 def buildCtx     = '.'
-def dockerArgs   = ''
 def npmCacheHost = ''
+def innerDockerArgs = ''  // for preflightCheck's inside() mount
 
 pipeline {
-    agent any
+    agent {
+        docker {
+            image 'agileqa/jenkins-agent:multi-tool'
+            // IMPORTANT: adjust the GID below to match host docker group (run `getent group docker`)
+            args  '-v /var/run/docker.sock:/var/run/docker.sock --group-add 991'
+            reuseNode true
+        }
+    }
 
     options {
         skipDefaultCheckout(true)
@@ -28,7 +36,7 @@ pipeline {
 
     parameters {
         booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
-        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx for multi-arch')
+        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override for image tag (defaults to "latest")')
     }
 
@@ -46,19 +54,17 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    // Select Node.js-capable agent image (per your vars/selectAgent.groovy)
-                    nodeImage  = selectAgent('nodejs')   // returns e.g. node:20
-                    proxyEnv   = collectProxyEnv()       // proxy env list for withEnv in dockerBuildPush
-
+                    proxyEnv   = collectProxyEnv()
                     tag        = env.IMAGE_TAG?.trim() ? env.IMAGE_TAG.trim() : 'latest'
                     dockerfile = "${projDir}/Dockerfile"
 
-                    // Setup npm cache host directory for speed
+                    // Local npm cache and socket mount for inner container used by preflightCheck
                     npmCacheHost = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
 
-                    // Volume mount the npm cache into the container
-                    dockerArgs = "-v ${npmCacheHost}:/home/node/.npm"
+                    // Preflight runs inside another container too; give it the socket & npm cache
+                    // Adjust docker group GID if different on your host
+                    innerDockerArgs = "-v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${npmCacheHost}:/home/node/.npm"
                 }
             }
         }
@@ -66,19 +72,17 @@ pipeline {
         stage('Preflight') {
             steps {
                 script {
-                    // Your current preflight prints .NET/NuGet; harmless but you may add Node/npm checks in the future.
-                    preflightCheck(image: nodeImage, dockerArgs: dockerArgs, workDir: projDir)
+                    // Use the same multi-tool image for preflight to ensure docker CLI is available inside()
+                    preflightCheck(image: 'agileqa/jenkins-agent:multi-tool', dockerArgs: innerDockerArgs, workDir: projDir)
                 }
             }
         }
 
         stage('Build (Node)') {
             steps {
-                script {
-                    dir(projDir) {
-                        // Shared lib: for 'node' => "npm install && npm run build"
-                        runBuild('node')
-                    }
+                dir(projDir) {
+                    // Shared library: npm install && npm run build
+                    runBuild('node')
                 }
             }
         }
@@ -94,7 +98,7 @@ pipeline {
                         useBuildx   : params.USE_BUILDX,
                         useBuildKit : params.USE_BUILDKIT,
                         proxyEnv    : proxyEnv
-                        // secretFiles: ['.npmrc'] // uncomment if you add a private registry token file
+                        // secretFiles: ['.npmrc'] // enable if you add a private registry token
                     )
                 }
             }
@@ -102,14 +106,10 @@ pipeline {
 
         stage('Deploy Locally') {
             steps {
-                script {              
-                    deployContainer(
-                    image: "${repo}:${tag}",
-                    containerName: 'node_sample_container',
-                    ports: '3000:3000',
-                    healthPath: '/health'
-                    )
-
+                script {
+                    // Your helper expects the app to expose port 80 and a /health endpoint.
+                    // If your Node app uses 3000, I can extend deployContainer to accept ports.
+                    deployContainer(image: "${repo}:${tag}", containerName: 'node_sample_container')
                 }
             }
         }
