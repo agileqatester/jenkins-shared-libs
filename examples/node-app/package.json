@@ -1,8 +1,13 @@
 {
-  "name": "node-frontend-app",
+  "name": "node-sample",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "build": "echo 'Building frontend...' && mkdir -p dist && cp index.html dist/"
+    "start": "node server.js",
+    "build": "echo \"No build step\""
   },
-  "dependencies": {}
+  "dependencies": {
+    "express": "^4.21.0"
+  }
 }

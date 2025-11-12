@@ -20,6 +20,10 @@ def call(Map cfg = [:]) {
               dotnet --info || true
               echo "Checking NuGet connectivity:"
               curl -I --max-time 20 https://api.nuget.org/v3/index.json || true
+              echo "Checking Node:"
+            node --version || true
+            npm --version || true
+            curl -I --max-time 20 https://registry.npmjs.org || true
               echo "=== Preflight OK ==="
             '''
         }

@@ -1,60 +1,120 @@
+@Library('jenkins-shared-library@main') _
+
+/**
+ * Node.js Declarative pipeline (hybrid) reusing shared library steps.
+ * Repos & paths:
+ *   - Image repo: agileqa/node-sample
+ *   - Workdir   : examples/node-app
+ *   - Dockerfile: examples/node-app/Dockerfile
+ */
+
+def proxyEnv     = [:]
+def nodeImage    = ''
+def repo         = 'agileqa/node-sample'
+def tag          = ''
+def projDir      = 'examples/node-app'
+def dockerfile   = ''
+def buildCtx     = '.'
+def dockerArgs   = ''
+def npmCacheHost = ''
+
 pipeline {
-    agent none
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
+        booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch builder)')
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional image tag override (defaults to "latest")')
+    }
+
+    environment {
+        DOCKERHUB_REPO = 'agileqa/node-sample'
+    }
 
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Init') {
-            agent any
             steps {
                 script {
-                        library identifier: 'jenkins-shared-library@main', retriever: modernSCM([
-                            $class: 'GitSCMSource',
-                            remote: 'https://github.com/agileqatester/jenkins-shared-libs.git',
-                            credentialsId: 'git-agiletester'
-                    ])                            
-                    def nodeImage = selectAgent('node') // Shared library call
+                    nodeImage  = selectAgent('node')   // shared lib: returns a Node-capable agent image
+                    proxyEnv   = collectProxyEnv()     // shared lib: returns proxy env list for withEnv
+
+                    tag        = env.IMAGE_TAG?.trim() ? env.IMAGE_TAG.trim() : 'latest'
+                    dockerfile = "${projDir}/Dockerfile"
+
+                    // Local npm cache to speed up npm install/ci during build steps inside docker
+                    npmCacheHost = "${env.WORKSPACE}/.npm"
+                    sh "mkdir -p '${npmCacheHost}'"
+
+                    // If you later add npmDockerArgs(...) to your library, swap this for that helper
+                    dockerArgs = "-v ${npmCacheHost}:/home/node/.npm"
                 }
             }
         }
 
-
-    stage('Build in Docker') {
-        agent {
-            docker {
-                image "${nodeImage}"
-                args '-v /var/run/docker.sock:/var/run/docker.sock'
-            }
-        }
-        environment {
-            DOCKERHUB_REPO = 'agileqa/node-sample'
-            IMAGE_TAG = 'latest'
-        }
-    stages {
-        stage('Build') {
+        stage('Preflight') {
             steps {
-                dir('examples/node-app') {
-                    runBuild('node')
+                script {
+                    // NOTE: preflightCheck currently prints .NET info; harmless here but you may want to
+                    // extend it to probe Node (e.g., node --version, npm --version) for better signals.
+                    preflightCheck(image: nodeImage, dockerArgs: dockerArgs, workDir: projDir)
                 }
             }
         }
+
+        stage('Build (Node)') {
+            steps {
+                script {
+                    dir(projDir) {
+                        // shared lib runBuild('node') => `npm install && npm run build`
+                        runBuild('node')
+                    }
+                }
+            }
+        }
+
         stage('Docker Build & Push') {
             steps {
                 script {
-                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-agileqa') {
-                        def app = docker.build("${DOCKERHUB_REPO}:${IMAGE_TAG}")
-                        app.push()
-                    }
+                    dockerBuildPush(
+                        image       : repo,
+                        tag         : tag,
+                        dockerfile  : dockerfile,
+                        context     : buildCtx,
+                        useBuildx   : params.USE_BUILDX,
+                        useBuildKit : params.USE_BUILDKIT,
+                        proxyEnv    : proxyEnv
+                        // secretFiles: ['.npmrc'] // enable if you add a private registry file
+                    )
                 }
             }
         }
+
         stage('Deploy Locally') {
             steps {
-                sh """
-                    docker rm -f node_sample_container || true
-                    docker run -d --name node_sample_container -p 3000:3000 ${DOCKERHUB_REPO}:${IMAGE_TAG}
-                """
-                    }
-                }                
+                script {
+                    // Your deployContainer defaults containerName to 'dotnet_sample_container' and expects port 80.
+                    // Override the name for Node; ensure your Node image listens on 80 or adjust the helper to support ports.
+                    deployContainer(image: "${repo}:${tag}", containerName: 'node_sample_container')
+                }
             }
+        }
+    }
+
+    post {
+        always {
+            echo "Build finished for ${repo}:${tag}"
         }
     }
 }
