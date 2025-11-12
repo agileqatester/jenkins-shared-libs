@@ -1,30 +1,20 @@
 @Library('jenkins-shared-library@main') _
 
-/**
- * Node.js pipeline using Built-In Node (controller) to launch a Docker agent per build.
- * - Requires Docker daemon+CLI on the Built-In Node (or Jenkins-in-Docker with socket mounted).
- * - Agent container uses host network + host Docker socket.
- * - Proxy is applied at runtime only; docker image history is scanned to prevent leaks.
- *
- * Image repo: agileqa/node-sample
- * Workdir   : examples/node-app
- * Dockerfile: examples/node-app/Dockerfile
- */
-
 def proxyEnv         = [:]
 def repo             = 'agileqa/node-sample'
 def tag              = ''
 def projDir          = 'examples/node-app'
 def buildCtx         = projDir
-def dockerfile       = "${projDir}/Dockerfile"  // full path from workspace root
+def dockerfile       = "${projDir}/Dockerfile"  // unambiguous path from workspace root
 def npmCacheHost     = ''
-def innerDockerArgs  = '' // for preflightCheck's inner docker.image(...).inside(...)
+def innerDockerArgs  = '' // for nested docker if you keep it
 
 pipeline {
     agent {
         docker {
+            label 'built-in' // <— ensure we run on Built‑In Node
             image 'agileqa/jenkins-agent:multi-tool'
-            // Use host network (corp DNS), mount host Docker socket, add docker group GID (replace 991 if different)
+            // host network (corp DNS), host docker socket, docker group GID (replace 991)
             args  '--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add 991'
             reuseNode true
         }
@@ -37,26 +27,19 @@ pipeline {
     }
 
     parameters {
-        // Build toggles
         booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
         booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override (defaults to "latest")')
-
-        // Proxy inputs (or rely on Jenkins Global env)
         string(name: 'HTTP_PROXY',  defaultValue: '', description: 'http://user:pass@proxy-host:port (or http://proxy-host:port)')
         string(name: 'HTTPS_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port')
         string(name: 'NO_PROXY',    defaultValue: '', description: 'localhost,127.0.0.1,.corp.local')
     }
 
-    // Make proxy env available inside the agent container
     environment {
         DOCKERHUB_REPO = 'agileqa/node-sample'
-
         HTTP_PROXY  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
         HTTPS_PROXY = "${params.HTTPS_PROXY ?: env.HTTPS_PROXY ?: ''}"
         NO_PROXY    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
-
-        // Lowercase variants for tools that expect them
         http_proxy  = "${HTTP_PROXY}"
         https_proxy = "${HTTPS_PROXY}"
         no_proxy    = "${NO_PROXY}"
@@ -75,10 +58,15 @@ pipeline {
                     npmCacheHost    = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
 
-                    // Inner container for preflight also needs host net + socket + group + cache
                     innerDockerArgs = "--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${npmCacheHost}:/home/node/.npm"
 
-                    // Sanity: correct Dockerfile path
+                    sh '''
+                      set -eux
+                      id
+                      ls -l /var/run/docker.sock || true
+                      docker version
+                    '''
+
                     sh """
                       set -eux
                       test -f '${dockerfile}'
@@ -91,9 +79,10 @@ pipeline {
         stage('Preflight') {
             steps {
                 script {
-                    // Proxy-aware preflight
                     withEnv(proxyEnv) {
+                        // Prefer running “here” to avoid nested docker; set inside:true if you really want nesting
                         preflightCheck(
+                            inside    : false,
                             image     : 'agileqa/jenkins-agent:multi-tool',
                             dockerArgs: innerDockerArgs,
                             workDir   : projDir
@@ -106,7 +95,7 @@ pipeline {
         stage('Build (Node)') {
             steps {
                 script {
-                    // Apply proxy to npm; clear NO_PROXY so it won't bypass proxy for public registries
+                    // Use proxy env; clear NO_PROXY so npm doesn't bypass proxy to public registry
                     withEnv(
                         proxyEnv + [
                             "NPM_CONFIG_PROXY=${env.HTTP_PROXY}",
@@ -126,8 +115,7 @@ pipeline {
                               npm config get https-proxy || true
                               npm config get noproxy || true
                             '''
-                            // Shared lib: npm install && npm run build
-                            runBuild('node')
+                            runBuild('node') // npm install && npm run build
                         }
                     }
                 }
@@ -153,7 +141,6 @@ pipeline {
         stage('Deploy Locally') {
             steps {
                 script {
-                    // Assumes the node image serves on port 80 with /health
                     deployContainer(image: "${repo}:${tag}", containerName: 'node_sample_container')
                 }
             }
