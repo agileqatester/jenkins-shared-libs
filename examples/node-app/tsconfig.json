@@ -1,16 +1,23 @@
 {
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": ".",
     "target": "ES2022",
-    "module": "ES2022",
+    "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "resolveJsonModule": true,
     "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    "allowJs": true,        // ← allow .js inputs
+    "checkJs": false,       // ← keep type-checking off for JS for now
     "strict": true,
     "skipLibCheck": true,
     "sourceMap": false
   },
-  "include": ["src/**/*.ts"],
+  "include": [
+    "server.js",
+    "src/**/*.js",
+    "src/**/*.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }
