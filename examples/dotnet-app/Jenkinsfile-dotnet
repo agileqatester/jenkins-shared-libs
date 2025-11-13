@@ -13,17 +13,28 @@ node {
     def buildCtx      = '.'
     def nugetHomeHost = "${env.WORKSPACE}/.nuget"
     def dockerArgs    = nugetDockerArgs(nugetHomeHost: nugetHomeHost)
-    def proxyEnv      = collectProxyEnv()
+   // def proxyEnv      = collectProxyEnv()
+    def proxyEnv = collectProxyEnv(proxyCredId: 'corp-proxy-url', noProxyCredId: 'corp-no-proxy')
 
     stage('Checkout') { checkout scm }
     stage('Preflight') { preflightCheck(image: buildImage, dockerArgs: dockerArgs, workDir: projDir) }
     stage('NuGet Prep') { dotnetNugetPrep(image: buildImage, dockerArgs: dockerArgs, nugetHomeHost: nugetHomeHost) }
     stage('Prepare NuGet Config') { prepareNugetConfig() }
-    stage('Build (.NET)') { dotnetBuild(image: buildImage, dockerArgs: dockerArgs, envVars: proxyEnv, workDir: projDir) }
+    stage('Build (.NET)') { 
+            withEnv(proxyEnv) { dotnetBuild(image: buildImage, dockerArgs: dockerArgs, envVars: proxyEnv, workDir: projDir)}
+           //dotnetBuild(image: buildImage, dockerArgs: dockerArgs, envVars: proxyEnv, workDir: projDir) 
+        }
     stage('Docker Build & Push') {
-        dockerBuildPush(image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
-                        useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
-                        proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
+                                  withEnv(proxyEnv) {
+                                    dockerBuildPush(
+                                        image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
+                                        useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
+                                        proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
+
+                                    // dockerBuildPush(image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
+                                    //                 useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
+                                    //                 proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
+    }
     }
     stage('Deploy Locally') { deployContainer(image: "${repo}:${tag}") }
 }

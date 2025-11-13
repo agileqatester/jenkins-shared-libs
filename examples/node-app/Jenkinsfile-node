@@ -31,18 +31,18 @@ pipeline {
         booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override (defaults to "latest")')
         string(name: 'HTTP_PROXY',  defaultValue: '', description: 'http://user:pass@proxy-host:port (or http://proxy-host:port)')
-        string(name: 'HTTPS_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port')
+       // string(name: 'HTTPS_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port')
         string(name: 'NO_PROXY',    defaultValue: '', description: 'localhost,127.0.0.1,.corp.local')
     }
 
     environment {
         DOCKERHUB_REPO = 'agileqa/node-sample'
         HTTP_PROXY  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        HTTPS_PROXY = "${params.HTTPS_PROXY ?: env.HTTPS_PROXY ?: ''}"
+        HTTPS_PROXY = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
+        http_proxy  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
+        https_proxy = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
         NO_PROXY    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
-        http_proxy  = "${HTTP_PROXY}"
-        https_proxy = "${HTTPS_PROXY}"
-        no_proxy    = "${NO_PROXY}"
+        no_proxy    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
     }
 
     stages {
@@ -93,33 +93,35 @@ pipeline {
         }
 
         stage('Build (Node)') {
-            steps {
-                script {
-                    // Use proxy env; clear NO_PROXY so npm doesn't bypass proxy to public registry
-                    withEnv(
-                        proxyEnv + [
-                            "NPM_CONFIG_PROXY=${env.HTTP_PROXY}",
-                            "NPM_CONFIG_HTTPS_PROXY=${env.HTTPS_PROXY}",
-                            'NO_PROXY=',
-                            'no_proxy='
-                        ]
-                    ) {
-                        dir(projDir) {
-                            sh '''
-                              set -eux
-                              if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
-                              if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
-                              npm config delete noproxy || true
-                              npm config set noproxy "" || true
-                              npm config get proxy || true
-                              npm config get https-proxy || true
-                              npm config get noproxy || true
-                            '''
-                            runBuild('node') // npm install && npm run build
-                        }
-                    }
+        steps {
+            script {
+            withCredentials([
+                string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
+                string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
+            ]) {
+                withEnv([
+                "HTTP_PROXY=${PROXY_URL}",
+                "HTTPS_PROXY=${PROXY_URL}",
+                "http_proxy=${PROXY_URL}",
+                "https_proxy=${PROXY_URL}",
+                "NO_PROXY=${NO_PROXY_LIST}",
+                "no_proxy=${NO_PROXY_LIST}",
+                "NPM_CONFIG_PROXY=${PROXY_URL}",
+                "NPM_CONFIG_HTTPS_PROXY=${PROXY_URL}"
+                ]) {
+                dir(projDir) {
+                    sh '''
+                    set -euo pipefail
+                    # No writes to .npmrc; env is enough
+                    npm ci --no-audit --no-fund
+                    npm run build
+                    '''
+                    runBuild('node') // if your shared-lib needs it; otherwise remove duplicate
+                }
                 }
             }
+            }
+        }
         }
 
         stage('Docker Build & Push') {

@@ -1,21 +1,25 @@
-# syntax=docker/dockerfile:1.5
-
-FROM node:20-alpine AS base
+# --- builder ---
+FROM node:20-alpine AS build
 WORKDIR /app
 
-# Set environment for production
-ENV NODE_ENV=production \
-    PORT=80
-
-# Install dependencies first for better layer caching
+# Faster dependency layer with cache
 COPY package*.json ./
-# Prefer reproducible installs if lockfile exists
 RUN --mount=type=cache,target=/root/.npm \
-    if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+    npm ci --no-audit --no-fund
 
-# Copy the rest of the app
+# Copy sources and build
 COPY . .
+RUN npm run build
 
-# Ensure your server.js respects PORT (process.env.PORT || 80)
+# Strip dev deps for runtime
+RUN npm prune --omit=dev
+
+# --- runtime (alpine debug-friendly) ---
+FROM node:20-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+USER node
 EXPOSE 80
-CMD ["node", "server.js"]
+CMD ["node", "dist/server.js"]

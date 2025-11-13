@@ -33,41 +33,41 @@ node {
       }
     }
 
-    stage('Build image (no proxy in history)') {
-      withEnv(['DOCKER_BUILDKIT=1']) {
-        // Diagnostic: confirm BuildKit on this node (prints 'true' or nothing)
-        sh 'docker info | sed -n "s/^ BuildKit: //p" || true'
+      stage('Build image (no proxy in history)') {
+        withEnv(['DOCKER_BUILDKIT=1']) {
+          // Diagnostic: confirm BuildKit on this node (prints 'true' or nothing)
+          sh 'docker info | sed -n "s/^ BuildKit: //p" || true'
 
-        env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
+          env.SHORT_SHA = sh(script: "git rev-parse --short=12 HEAD", returnStdout: true).trim()
 
-        def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
-        if (!tag) { tag = env.BUILD_NUMBER }  // optional fallback
+          def tag = (params.IMAGE_TAG?.trim()) ? params.IMAGE_TAG.trim() : env.SHORT_SHA
+          if (!tag) { tag = env.BUILD_NUMBER }  // optional fallback
 
-        def fullRef = "${params.IMAGE_NAME}:${tag}"
+          def fullRef = "${params.IMAGE_NAME}:${tag}"
 
-        // Single-line args to avoid Groovy parsing issues
-        def buildArgs = "--progress=plain --secret id=nuget_config,src=nuget.config -f examples/dotnet-app/Dockerfile ."
+          // Single-line args to avoid Groovy parsing issues
+          def buildArgs = "--progress=plain --secret id=nuget_config,src=nuget.config -f examples/dotnet-app/Dockerfile ."
 
-        def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
+          def img = docker.build("${params.IMAGE_NAME}:${tag}", buildArgs)
 
-        if (params.PUBLISH_IMAGE) {
-          docker.withRegistry('', 'docker-hub-agileqa') {
-            img.push(tag)
-            img.push('latest')
+          if (params.PUBLISH_IMAGE) {
+            docker.withRegistry('', 'docker-hub-agileqa') {
+              img.push(tag)
+              img.push('latest')
+            }
           }
-        }
 
-        // History gate with literal heredoc and runtime replacement
-        sh '''
-          set -e
-          docker history __FULL_REF__ --no-trunc | tee history.txt
-          if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
-            echo 'ERROR: Proxy strings found in image history!' 1>&2
-            exit 1
-          fi
-        '''.replace('__FULL_REF__', fullRef)
+          // History gate with literal heredoc and runtime replacement
+          sh '''
+            set -e
+            docker history __FULL_REF__ --no-trunc | tee history.txt
+            if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+              echo 'ERROR: Proxy strings found in image history!' 1>&2
+              exit 1
+            fi
+          '''.replace('__FULL_REF__', fullRef)
+        }
       }
-    }
 
 
     stage('Cleanup') {

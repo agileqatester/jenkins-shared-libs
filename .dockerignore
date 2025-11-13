@@ -25,3 +25,10 @@ build
 .env
 .env.*
 .npmrc
+
+coverage
+*.log
+.env
+*.local.*
+Dockerfile*
+docker-compose*
