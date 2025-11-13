@@ -62,14 +62,14 @@ pipeline {
                     innerDockerArgs = "--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${npmCacheHost}:/home/node/.npm"
 
                     sh '''
-                      set -euo pipefail
+                      set -eu
                       id
                       ls -l /var/run/docker.sock || true
                       docker version
                     '''
 
                     sh """
-                      set -euo pipefail
+                      set -eu
                       test -f '${dockerfile}'
                       head -n 5 '${dockerfile}'
                     """
@@ -102,7 +102,7 @@ pipeline {
                             runBuild('node')
                             // Or explicit commands instead of runBuild:
                             // sh '''
-                            //   set -euo pipefail
+                            //   set -eu
                             //   npm ci --no-audit --no-fund
                             //   npm run build
                             // '''
