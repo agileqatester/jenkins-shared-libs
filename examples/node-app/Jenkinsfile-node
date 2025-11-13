@@ -122,7 +122,7 @@ pipeline {
                             tag         : tag,
                             dockerfile  : dockerfile, // examples/node-app/Dockerfile
                             context     : buildCtx,   // examples/node-app
-                            useBuildx   : params.USE_BUILDX,
+                            useBuildx   : true,
                             useBuildKit : params.USE_BUILDKIT,
                             proxyEnv    : proxyEnv
                         )

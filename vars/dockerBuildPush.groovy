@@ -42,41 +42,52 @@ withCredentials([usernamePassword(credentialsId: credsId, usernameVariable: 'DOC
         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
         '''
 
-    if (useBuildx) {
-      // NEW: inject proxy into buildkitd itself
-      def driverOpts = []
-      if (httpProxy)  driverOpts << "env.http_proxy=${httpProxy}"
-      if (httpsProxy) driverOpts << "env.https_proxy=${httpsProxy}"
-      if (noProxy)    driverOpts << "env.no_proxy=${noProxy}"
+if (useBuildx) {
+  // Configure driver options (proxy + optional host networking for corp DNS)
+  def driverOpts = []
+  if (httpProxy)  driverOpts << "env.http_proxy=${httpProxy}"
+  if (httpsProxy) driverOpts << "env.https_proxy=${httpsProxy}"
+  if (noProxy)    driverOpts << "env.no_proxy=${noProxy}"
+  // Strongly recommended in corp/VPN: let buildkitd use host’s DNS
+  driverOpts << "network=host"
 
-      sh """#!/bin/sh
+  sh """#!/bin/sh
         set -eu
-        docker buildx create --use --name jxbuilder --driver docker-container \\
-        ${driverOpts.collect { "--driver-opt ${it}" }.join(' ')} \\
-        >/dev/null 2>&1 || true
-        docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+        # Create or update a docker-container builder named jxbuilder
+        (docker buildx ls | grep -q '^jxbuilder') || docker buildx create --name jxbuilder --driver docker-container
+        # Apply driver opts (recreate node if needed)
+        docker buildx rm jxbuilder >/dev/null 2>&1 || true
+        docker buildx create --name jxbuilder --driver docker-container \\
+          ${driverOpts.collect { "--driver-opt ${it}" }.join(' ')} \\
+          --use >/dev/null
+        docker buildx inspect --bootstrap >/dev/null
+        docker buildx ls
         """
 
-      def secretStr = (secretFlags ? secretFlags.join(' ') : '')
-      def proxyStr  = proxyArgs.join(' ')
-      sh """#!/bin/sh
+  def secretStr = (secretFlags ? secretFlags.join(' ') : '')
+  def proxyStr  = proxyArgs.join(' ')
+
+  // Use the named builder explicitly
+  sh """#!/bin/sh
         set -eu
-        docker buildx build --progress=plain --load \\
-        ${secretStr} \\
-        ${proxyStr} \\
-        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+        docker buildx build --builder jxbuilder --progress=plain --load \\
+          ${secretStr} \\
+          ${proxyStr} \\
+          -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
         """
-    } else {
-      def secretStr = (secretFlags ? secretFlags.join(' ') : '')
-      def proxyStr  = proxyArgs.join(' ')
-      sh """#!/bin/sh
-        set -eu
-        docker build --progress=plain \\
-        ${secretStr} \\
-        ${proxyStr} \\
-        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-        """
-    }
+        } else {
+          def secretStr = (secretFlags ? secretFlags.join(' ') : '')
+          def proxyStr  = proxyArgs.join(' ')
+          sh """#!/bin/sh
+                set -eu
+                echo "[WARN] Classic 'docker build' uses the Docker daemon for pulls. If the daemon is not proxy-configured, pulls may fail."
+                docker build --progress=plain \\
+                  ${secretStr} \\
+                  ${proxyStr} \\
+                  -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+                """
+          }
+
 
             // Push tag
             sh """#!/bin/sh
