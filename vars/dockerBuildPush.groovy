@@ -47,45 +47,45 @@ set -eu
 echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
 '''
 
-            if (useBuildx) {
-                // Only http/https proxy in driver-opts; DO NOT pass env.no_proxy here (commas break parsing)
-                List<String> driverOptParts = []
-                if (httpProxy)    driverOptParts << "--driver-opt 'env.http_proxy=${httpProxy}'"
-                if (httpsProxy)   driverOptParts << "--driver-opt 'env.https_proxy=${httpsProxy}'"
-                if (allowHostNet) driverOptParts << "--driver-opt network=host"
-                String driverOptsStr = driverOptParts.join(' ')
+if (useBuildx) {
+    // Driver opts: pass only HTTP/HTTPS proxy; do NOT pass env.no_proxy (commas break k=v)
+    List<String> driverOptParts = []
+    if (httpProxy)  driverOptParts << "--driver-opt 'env.http_proxy=${httpProxy}'"
+    if (httpsProxy) driverOptParts << "--driver-opt 'env.https_proxy=${httpsProxy}'"
+    // Helpful for corp DNS: let buildkitd use host networking
+    driverOptParts << "--driver-opt network=host"
+    String driverOptsStr = driverOptParts.join(' ')
 
-                // Recreate named docker-container builder so options apply (idempotent)
-                sh """#!/bin/sh
+    sh """#!/bin/sh
+      set -eu
+      (docker buildx ls | grep -q '^jxbuilder[[:space:]]') && docker buildx rm jxbuilder >/dev/null 2>&1 || true
+      docker buildx create --name jxbuilder --driver docker-container \\
+        ${driverOptsStr} \\
+        --use >/dev/null
+      docker buildx inspect --bootstrap >/dev/null
+      echo "=== buildx ls ==="
+      docker buildx ls
+      """
+
+    String secretStr = (secretFlags ? secretFlags.join(' ') : '')
+    String proxyStr  = proxyArgs.join(' ')
+    // If needed in your environment: allow host network in the build itself (optional)
+    String hostNet   = "--allow=network.host --network=host"
+
+    sh """#!/bin/sh
 set -eu
-(docker buildx ls | grep -q '^${builderName}[[:space:]]') && docker buildx rm ${builderName} >/dev/null 2>&1 || true
-docker buildx create --name ${builderName} --driver docker-container \\
-  ${driverOptsStr} \\
-  --use >/dev/null
-docker buildx inspect --bootstrap >/dev/null
-echo "=== buildx ls ==="
-docker buildx ls
-"""
-
-                String secretStr = (secretFlags ? secretFlags.join(' ') : '')
-                String proxyStr  = proxyArgs.join(' ')
-                String hostNet   = allowHostNet ? "--allow=network.host --network=host" : ""
-
-                // Force the named builder
-                sh """#!/bin/sh
-set -eu
-DOCKER_BUILDX_BUILDER=${builderName} \\
-docker buildx build --builder ${builderName} --progress=plain --load \\
+DOCKER_BUILDX_BUILDER=jxbuilder \\
+docker buildx build --builder jxbuilder --progress=plain --load \\
   ${hostNet} \\
   ${secretStr} \\
   ${proxyStr} \\
   -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
 """
-            } else {
-                // Classic docker build; pulls depend on daemon proxy/DNS on the host
-                String secretStr = (secretFlags ? secretFlags.join(' ') : '')
-                String proxyStr  = proxyArgs.join(' ')
-                sh """#!/bin/sh
+} else {
+    // Classic docker build (daemon must be proxy/DNS configured or pre-pull the base image)
+    String secretStr = (secretFlags ? secretFlags.join(' ') : '')
+    String proxyStr  = proxyArgs.join(' ')
+    sh """#!/bin/sh
 set -eu
 echo "[WARN] Classic 'docker build' uses the Docker daemon for pulls. If the daemon isn't proxy/DNS-configured, pulls may fail."
 docker build --progress=plain \\
@@ -93,7 +93,7 @@ docker build --progress=plain \\
   ${proxyStr} \\
   -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
 """
-            }
+}
 
             // Push tag
             sh """#!/bin/sh
