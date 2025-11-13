@@ -96,16 +96,14 @@ pipeline {
         stage('Build (Node)') {
             steps {
                 script {
-                    withEnv(proxyEnv) {
+                    // Ensure proxy variables are set and devDependencies are installed
+                    withEnv(proxyEnv + ['NODE_ENV=development']) {
                         dir(projDir) {
-                            // Prefer using your shared lib’s runBuild('node') to keep behavior centralized:
-                            runBuild('node')
-                            // Or explicit commands instead of runBuild:
-                            // sh '''
-                            //   set -eu
-                            //   npm ci --no-audit --no-fund
-                            //   npm run build
-                            // '''
+                            nodeInstallBuild(
+                                node:        '20-alpine',   // Node.js version (Docker tag)
+                                pkgMgr:      'npm',         // or 'yarn' if preferred
+                                buildScript: 'build'        // script name in package.json
+                            )
                         }
                     }
                 }
