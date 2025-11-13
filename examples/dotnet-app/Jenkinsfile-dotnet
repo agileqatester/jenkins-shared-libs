@@ -30,10 +30,6 @@ node {
                                         image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
                                         useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
                                         proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
-
-                                    // dockerBuildPush(image: repo, tag: tag, dockerfile: dockerfile, context: buildCtx,
-                                    //                 useBuildx: params.USE_BUILDX, useBuildKit: params.USE_BUILDKIT,
-                                    //                 proxyEnv: proxyEnv, secretFiles: ['nuget.config'])
     }
     }
     stage('Deploy Locally') { deployContainer(image: "${repo}:${tag}") }

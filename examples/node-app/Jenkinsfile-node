@@ -117,12 +117,17 @@ pipeline {
                 script {
                     // Provide proxy vars during docker build (as build-args, not ENV in Dockerfile)
                     withEnv(proxyEnv) {
+                        sh '''#!/bin/sh
+                        set -eu
+                        # Pre-pull base image using the daemon path (may hit host DNS/proxy)
+                        docker pull node:20-alpine || true
+                        '''
                         dockerBuildPush(
                             image       : repo,
                             tag         : tag,
                             dockerfile  : dockerfile, // examples/node-app/Dockerfile
                             context     : buildCtx,   // examples/node-app
-                            useBuildx   : true,
+                            useBuildx   : false,
                             useBuildKit : params.USE_BUILDKIT,
                             proxyEnv    : proxyEnv
                         )
