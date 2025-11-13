@@ -1,7 +1,7 @@
 @Library('jenkins-shared-library@main') _
 
 def proxyEnv         = [:]
-def repo             = 'agileqa/node-sample'
+def repo             = null
 def tag              = ''
 def projDir          = 'examples/node-app'
 def buildCtx         = projDir
@@ -12,7 +12,7 @@ def innerDockerArgs  = '' // for nested docker if you keep it
 pipeline {
     agent {
         docker {
-            label 'built-in' // <— ensure we run on Built‑In Node
+            label 'built-in' // ensure we run on Built‑In Node
             image 'agileqa/jenkins-agent:multi-tool'
             // host network (corp DNS), host docker socket, docker group GID (replace 991)
             args  '--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add 991'
@@ -30,20 +30,16 @@ pipeline {
         booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
         booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override (defaults to "latest")')
-        string(name: 'HTTP_PROXY',  defaultValue: '', description: 'http://user:pass@proxy-host:port (or http://proxy-host:port)')
-       // string(name: 'HTTPS_PROXY', defaultValue: '', description: 'http://user:pass@proxy-host:port')
-        string(name: 'NO_PROXY',    defaultValue: '', description: 'localhost,127.0.0.1,.corp.local')
+
+        // Optional overrides (primary source is credentials via collectProxyEnv)
+        string(name: 'HTTP_PROXY', defaultValue: '', description: '(optional) http://user:pass@proxy-host:port')
+        string(name: 'NO_PROXY',   defaultValue: '', description: '(optional) localhost,127.0.0.1,.corp.local')
+
+        // so we avoid hardcoding repo
+        string(name: 'DOCKERHUB_REPO', defaultValue: 'agileqa/node-sample', description: 'Docker Hub repo (org/name)')
     }
 
-    environment {
-        DOCKERHUB_REPO = 'agileqa/node-sample'
-        HTTP_PROXY  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        HTTPS_PROXY = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        http_proxy  = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        https_proxy = "${params.HTTP_PROXY  ?: env.HTTP_PROXY  ?: ''}"
-        NO_PROXY    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
-        no_proxy    = "${params.NO_PROXY    ?: env.NO_PROXY    ?: ''}"
-    }
+    // No global proxy environment here—inject only where needed via withEnv(proxyEnv)
 
     stages {
         stage('Checkout') {
@@ -53,22 +49,27 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    proxyEnv        = collectProxyEnv()
+                    // Build proxy env once (collectProxyEnv should handle params/env/credentials precedence)
+                    proxyEnv        = collectProxyEnv(proxyCredId: 'corp-proxy-url', noProxyCredId: 'corp-no-proxy')
+
+                    // Repo & tag
+                    repo            = (params.DOCKERHUB_REPO?.trim()) ? params.DOCKERHUB_REPO.trim() : 'agileqa/node-sample'
                     tag             = env.IMAGE_TAG?.trim() ? env.IMAGE_TAG.trim() : 'latest'
+
+                    // Caches & inner docker args
                     npmCacheHost    = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
-
                     innerDockerArgs = "--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add 991 -v ${npmCacheHost}:/home/node/.npm"
 
                     sh '''
-                      set -eux
+                      set -euo pipefail
                       id
                       ls -l /var/run/docker.sock || true
                       docker version
                     '''
 
                     sh """
-                      set -eux
+                      set -euo pipefail
                       test -f '${dockerfile}'
                       head -n 5 '${dockerfile}'
                     """
@@ -93,49 +94,39 @@ pipeline {
         }
 
         stage('Build (Node)') {
-        steps {
-            script {
-            withCredentials([
-                string(credentialsId: 'corp-proxy-url', variable: 'PROXY_URL'),
-                string(credentialsId: 'corp-no-proxy',  variable: 'NO_PROXY_LIST')
-            ]) {
-                withEnv([
-                "HTTP_PROXY=${PROXY_URL}",
-                "HTTPS_PROXY=${PROXY_URL}",
-                "http_proxy=${PROXY_URL}",
-                "https_proxy=${PROXY_URL}",
-                "NO_PROXY=${NO_PROXY_LIST}",
-                "no_proxy=${NO_PROXY_LIST}",
-                "NPM_CONFIG_PROXY=${PROXY_URL}",
-                "NPM_CONFIG_HTTPS_PROXY=${PROXY_URL}"
-                ]) {
-                dir(projDir) {
-                    sh '''
-                    set -euo pipefail
-                    # No writes to .npmrc; env is enough
-                    npm ci --no-audit --no-fund
-                    npm run build
-                    '''
-                    runBuild('node') // if your shared-lib needs it; otherwise remove duplicate
-                }
+            steps {
+                script {
+                    withEnv(proxyEnv) {
+                        dir(projDir) {
+                            // Prefer using your shared lib’s runBuild('node') to keep behavior centralized:
+                            runBuild('node')
+                            // Or explicit commands instead of runBuild:
+                            // sh '''
+                            //   set -euo pipefail
+                            //   npm ci --no-audit --no-fund
+                            //   npm run build
+                            // '''
+                        }
+                    }
                 }
             }
-            }
-        }
         }
 
         stage('Docker Build & Push') {
             steps {
                 script {
-                    dockerBuildPush(
-                        image       : repo,
-                        tag         : tag,
-                        dockerfile  : dockerfile, // examples/node-app/Dockerfile
-                        context     : buildCtx,   // examples/node-app
-                        useBuildx   : params.USE_BUILDX,
-                        useBuildKit : params.USE_BUILDKIT,
-                        proxyEnv    : proxyEnv
-                    )
+                    // Provide proxy vars during docker build (as build-args, not ENV in Dockerfile)
+                    withEnv(proxyEnv) {
+                        dockerBuildPush(
+                            image       : repo,
+                            tag         : tag,
+                            dockerfile  : dockerfile, // examples/node-app/Dockerfile
+                            context     : buildCtx,   // examples/node-app
+                            useBuildx   : params.USE_BUILDX,
+                            useBuildKit : params.USE_BUILDKIT,
+                            proxyEnv    : proxyEnv
+                        )
+                    }
                 }
             }
         }
