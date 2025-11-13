@@ -13,66 +13,70 @@ def call(Map cfg = [:]) {
     List proxyEnv        = (cfg.proxyEnv ?: []) as List         // e.g., ["HTTP_PROXY=...", "NO_PROXY=..."]
     List secretFiles     = (cfg.secretFiles ?: []) as List       // e.g., ['nuget.config']
 
-    // Extract proxy values from proxyEnv (if present)
-    // We don't echo these values; Jenkins masks credentials but let's be cautious.
-    def envMap = proxyEnv.collectEntries { e ->
-        def idx = e.indexOf('=')
-        idx > 0 ? [(e.substring(0, idx)) : e.substring(idx + 1)] : [:]
+// Extract proxy values from proxyEnv list
+def envMap = proxyEnv.collectEntries { e ->
+    def i = e.indexOf('=')
+    i > 0 ? [(e.substring(0, i)) : e.substring(i + 1)] : [:]
+}
+String httpProxy  = (envMap['HTTP_PROXY'] ?: envMap['http_proxy'] ?: '').trim()
+String httpsProxy = (envMap['HTTPS_PROXY'] ?: envMap['https_proxy'] ?: httpProxy).trim()
+String noProxy    = (envMap['NO_PROXY']   ?: envMap['no_proxy']   ?: '').trim()
+
+// Transient build-args for Dockerfile RUN steps
+List<String> proxyArgs = []
+if (httpProxy)  proxyArgs << "--build-arg" << "HTTP_PROXY=${httpProxy}"
+if (httpsProxy) proxyArgs << "--build-arg" << "HTTPS_PROXY=${httpsProxy}"
+if (noProxy)    proxyArgs << "--build-arg" << "NO_PROXY=${noProxy}"
+
+// Secret flags only when BuildKit is on
+List<String> secretFlags = []
+if (useBuildKit && secretFiles && secretFiles.size() > 0) {
+    secretFlags = secretFiles.collect { f -> "--secret id=${f.replace('.','_')},src=${f}" }
+}
+
+withCredentials([usernamePassword(credentialsId: credsId, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+  withEnv((proxyEnv ?: []) + ["DOCKER_BUILDKIT=${useBuildKit ? '1' : '0'}"]) {
+
+    sh '''#!/bin/sh
+        set -eu
+        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
+        '''
+
+    if (useBuildx) {
+      // NEW: inject proxy into buildkitd itself
+      def driverOpts = []
+      if (httpProxy)  driverOpts << "env.http_proxy=${httpProxy}"
+      if (httpsProxy) driverOpts << "env.https_proxy=${httpsProxy}"
+      if (noProxy)    driverOpts << "env.no_proxy=${noProxy}"
+
+      sh """#!/bin/sh
+        set -eu
+        docker buildx create --use --name jxbuilder --driver docker-container \\
+        ${driverOpts.collect { "--driver-opt ${it}" }.join(' ')} \\
+        >/dev/null 2>&1 || true
+        docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+        """
+
+      def secretStr = (secretFlags ? secretFlags.join(' ') : '')
+      def proxyStr  = proxyArgs.join(' ')
+      sh """#!/bin/sh
+        set -eu
+        docker buildx build --progress=plain --load \\
+        ${secretStr} \\
+        ${proxyStr} \\
+        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+        """
+    } else {
+      def secretStr = (secretFlags ? secretFlags.join(' ') : '')
+      def proxyStr  = proxyArgs.join(' ')
+      sh """#!/bin/sh
+        set -eu
+        docker build --progress=plain \\
+        ${secretStr} \\
+        ${proxyStr} \\
+        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+        """
     }
-    String httpProxy = (envMap['HTTP_PROXY'] ?: envMap['http_proxy'] ?: '').trim()
-    String httpsProxy = (envMap['HTTPS_PROXY'] ?: envMap['https_proxy'] ?: httpProxy).trim()
-    String noProxy = (envMap['NO_PROXY'] ?: envMap['no_proxy'] ?: '').trim()
-
-    // Build args for proxies (transient only)
-    List<String> proxyArgs = []
-    if (httpProxy)  proxyArgs << "--build-arg" << "HTTP_PROXY=${httpProxy}"
-    if (httpsProxy) proxyArgs << "--build-arg" << "HTTPS_PROXY=${httpsProxy}"
-    if (noProxy)    proxyArgs << "--build-arg" << "NO_PROXY=${noProxy}"
-
-    // Secrets flags (only when BuildKit is active)
-    List<String> secretFlags = []
-    if (useBuildKit && secretFiles && secretFiles.size() > 0) {
-        // Convert: foo.bar => id=foo_bar
-        secretFlags = secretFiles.collect { f ->
-            def id = f.replace('.', '_')
-            "--secret id=${id},src=${f}"
-        }
-    }
-
-    withCredentials([usernamePassword(credentialsId: credsId, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-        // NOTE: we only inject DOCKER_BUILDKIT (masking is not needed; it's not secret)
-        withEnv((proxyEnv ?: []) + ["DOCKER_BUILDKIT=${useBuildKit ? '1' : '0'}"]) {
-            // Login
-            sh '''#!/bin/sh
-                    set -eu
-                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
-                    '''
-                                if (useBuildx) {
-                                    // Buildx path (BuildKit is inherently on)
-                                    // Build with --load so we can 'docker push' afterwards (or use --push directly if you prefer)
-                                    def secretStr = (secretFlags ? secretFlags.join(' ') : '')
-                                    def proxyStr  = proxyArgs.join(' ')
-                                    sh """#!/bin/sh
-                                            set -eu
-                                            docker buildx create --use --name jxbuilder >/dev/null 2>&1 || true
-                                            docker buildx inspect --bootstrap >/dev/null 2>&1 || true
-                                            docker buildx build --progress=plain --load \\
-                                            ${secretStr} \\
-                                            ${proxyStr} \\
-                                            -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-                                            """
-            } else {
-                // Classic docker build; BuildKit optional via DOCKER_BUILDKIT=1
-                def secretStr = (secretFlags ? secretFlags.join(' ') : '')
-                def proxyStr  = proxyArgs.join(' ')
-                sh """#!/bin/sh
-                        set -eu
-                        docker build --progress=plain \\
-                        ${secretStr} \\
-                        ${proxyStr} \\
-                        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-                        """
-            }
 
             // Push tag
             sh """#!/bin/sh
@@ -109,5 +113,5 @@ def call(Map cfg = [:]) {
                 docker logout >/dev/null 2>&1 || true
                 '''
         }
-    }
+  }
 }
