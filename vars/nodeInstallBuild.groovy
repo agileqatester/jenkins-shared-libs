@@ -9,7 +9,7 @@ def call(Map cfg = [:]) {
 
     if (pkgMgr == 'npm') {
       // Ensure devDependencies are present even if NODE_ENV=production is set upstream
-      sh 'NODE_ENV=development npm ci --include=dev'
+      sh 'NODE_ENV=development npm install --include=dev'
       sh 'npx --no-install tsc --version || true'  // optional sanity check
       if (params.RUN_TESTS) sh 'npm test --if-present'
       sh "npm run ${build} --if-present"
