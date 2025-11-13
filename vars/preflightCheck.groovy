@@ -11,7 +11,7 @@ def call(Map cfg = [:]) {
     }
 
     def script = """#!/bin/sh
-                set -eu
+                set -eu§
                 echo "=== Preflight ==="
                 whoami; id
                 echo "Workspace: \$(pwd)"
