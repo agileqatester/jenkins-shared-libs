@@ -6,15 +6,26 @@ def call(Map cfg = [:]) {
     boolean failOnHigh      = (cfg.failOnHigh != null) ? (cfg.failOnHigh as boolean) : true
     boolean checkDeps       = (cfg.checkDependencies != null) ? (cfg.checkDependencies as boolean) : false
     List<String> proxyEnv   = (cfg.proxyEnv instanceof List) ? (cfg.proxyEnv as List<String>) : []
+
     String trivyImage       = (cfg.trivyImage ?: 'aquasec/trivy:latest').trim()
     String depCheckImage    = (cfg.depCheckImage ?: 'owasp/dependency-check:latest').trim()
 
-    // NVD API key (recommended)
+    // Optional NVD key for Dependency-Check (highly recommended)
     String nvdApiKey        = (cfg.nvdApiKey ?: '').trim()
     String nvdApiKeyCredId  = (cfg.nvdApiKeyCredId ?: '').trim()
 
-    // Optional VPN override
+    // VPN override
     Boolean onVPNOverride   = (cfg.containsKey('onVPN') ? (cfg.onVPN as Boolean) : null)
+
+    // NEW: Optional explicit DNS servers to use in containers, e.g., ['10.10.0.2','10.10.0.3']
+    List<String> dnsServers = (cfg.dnsServers instanceof List) ? (cfg.dnsServers as List<String>) : []
+
+    // NEW: Hostnames to hard-pin via --add-host. Default includes ghcr.io for Trivy DB.
+    List<String> extraHosts = (cfg.extraHosts instanceof List) ? (cfg.extraHosts as List<String>) : ['ghcr.io']
+
+    // Timeouts for DC
+    int dcUpdateTimeoutMin  = (cfg.dcUpdateTimeoutMinutes ?: 5)  as int
+    int dcScanTimeoutMin    = (cfg.dcScanTimeoutMinutes   ?: 10) as int
 
     String workspaceDir     = env.WORKSPACE ?: '.'
 
@@ -52,9 +63,15 @@ def call(Map cfg = [:]) {
     String noProxy    = (pe['NO_PROXY']    ?: pe['no_proxy']    ?: '').trim()
 
     // ----------------------------------------------------
-    // DNS: detect real resolv.conf and nameservers
+    // DNS strategy for scanner containers
     // ----------------------------------------------------
-    // Prefer systemd-resolved's real resolv.conf if present; else /etc/resolv.conf
+    // 1) Build --dns args from cfg.dnsServers if provided (best).
+    String dnsArgs = ''
+    if (dnsServers && !dnsServers.isEmpty()) {
+        dnsArgs = dnsServers.collect { ns -> "--dns ${ns}" }.join(' ')
+    }
+
+    // 2) Mount a resolv.conf file (best-effort; not relied upon)
     String dnsMount = sh(script: '''
         set -eu
         if [ -s /run/systemd/resolve/resolv.conf ]; then
@@ -65,18 +82,26 @@ def call(Map cfg = [:]) {
           echo /etc/resolv.conf
         fi
     ''', returnStdout: true).trim()
+    String resolvMountArg = "-v ${dnsMount}:/etc/resolv.conf:ro"
 
-    // Build --dns flags from that file, excluding 127.0.0.53
-    String dnsArgs = sh(script: """
-        set -eu
-        if [ -r '${dnsMount}' ]; then
-          awk '/^nameserver[[:space:]]+[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+/ { if (\$2 != "127.0.0.53") printf("--dns %s ", \$2) }' '${dnsMount}' || true
-        fi
-    """, returnStdout: true).trim()
+    // 3) Hard-pin certain hostnames via --add-host <name>:<ip> (e.g., ghcr.io)
+    //    We resolve IPs *before* starting the scanner containers.
+    List<String> addHostArgsList = []
+    extraHosts.each { h ->
+        String ip = sh(script: """
+            set -eu
+            (getent hosts ${h} || nslookup -type=A ${h} 2>/dev/null | awk '/^Address: /{print \$2}') | awk 'NR==1 {print \$1}'
+        """, returnStdout: true).trim()
+        if (ip) {
+            addHostArgsList << "--add-host ${h}:${ip}"
+        } else {
+            echo "[WARN] Could not resolve ${h} on the agent; not adding --add-host."
+        }
+    }
+    String addHostsArgs = addHostArgsList.join(' ')
 
-    // Compose base inside() args: host network + host DNS config + explicit --dns servers (if any)
-    String hostArgs = "--network host -v ${dnsMount}:/etc/resolv.conf:ro " + (dnsArgs ?: "")
-    // ----------------------------------------------------
+    // Base args for docker.inside() in scanners
+    String hostArgs = "--network host ${resolvMountArg} ${dnsArgs} ${addHostsArgs}".trim()
 
     // ----------------------------------------------------
     // TRIVY
@@ -94,7 +119,6 @@ def call(Map cfg = [:]) {
                     sh """
                         set +x
                         set -eu
-                        # Quick DNS diag (one-liner, quiet)
                         getent hosts ghcr.io >/dev/null 2>&1 || true
                         trivy image --severity HIGH,CRITICAL \
                             --exit-code ${failOnHigh ? '1' : '0'} \
@@ -131,150 +155,126 @@ def call(Map cfg = [:]) {
     }
 
     // ----------------------------------------------------
-    // OWASP DEPENDENCY-CHECK
+    // OWASP DEPENDENCY-CHECK (update-only + timeout + noupdate scan)
     // ----------------------------------------------------
-    // ----------------------------------------------------
-// OWASP DEPENDENCY-CHECK (reliably timeout + fallback)
-// ----------------------------------------------------
-if (checkDeps) {
-    echo "Dependency-Check: ${onVPN ? 'online with proxy' : 'offline/no-proxy'}"
+    if (checkDeps) {
+        echo "Dependency-Check: ${onVPN ? 'online with proxy' : 'offline/no-proxy'}"
 
-    // Run container as Jenkins UID:GID so output is readable/publishable
-    def uid = sh(script: 'id -u', returnStdout: true).trim()
-    def gid = sh(script: 'id -g', returnStdout: true).trim()
-    String userArg = "--user ${uid}:${gid}"
+        // Run container as Jenkins UID:GID so output is readable/publishable
+        def uid = sh(script: 'id -u', returnStdout: true).trim()
+        def gid = sh(script: 'id -g', returnStdout: true).trim()
+        String userArg = "--user ${uid}:${gid}"
 
-    // Build proxy flags/env (avoid echoing values)
-    String proxyUrl = (httpsProxy ?: httpProxy)
-    List<String> dcEnv = []
-    String proxyFlags = ''
+        // Proxy flags/env (avoid echoing values)
+        String proxyUrl = (httpsProxy ?: httpProxy)
+        List<String> dcEnv = []
+        String proxyFlags = ''
 
-    if (onVPN && proxyUrl) {
-        def m = (proxyUrl =~ /^(https?:)\\/\\/(?:([^:@]+)(?::([^@]*))?@)?([^:\\/]+)(?::(\\d+))?.*$/)
-        if (m.matches()) {
-            String proxyHost = m[0][4]
-            String proxyPort = m[0][5] ?: '8080'
-            String proxyUser = m[0][2] ?: ''
-            String proxyPass = m[0][3] ?: ''
+        if (onVPN && proxyUrl) {
+            def m = (proxyUrl =~ /^(https?:)\\/\\/(?:([^:@]+)(?::([^@]*))?@)?([^:\\/]+)(?::(\\d+))?.*$/)
+            if (m.matches()) {
+                String proxyHost = m[0][4]
+                String proxyPort = m[0][5] ?: '8080'
+                String proxyUser = m[0][2] ?: ''
+                String proxyPass = m[0][3] ?: ''
 
-            if (proxyHost) dcEnv << "DC_PROXY_HOST=${proxyHost}"
-            if (proxyPort) dcEnv << "DC_PROXY_PORT=${proxyPort}"
-            if (proxyUser) dcEnv << "DC_PROXY_USER=${proxyUser}"
-            if (proxyPass) dcEnv << "DC_PROXY_PASS=${proxyPass}"
+                if (proxyHost) dcEnv << "DC_PROXY_HOST=${proxyHost}"
+                if (proxyPort) dcEnv << "DC_PROXY_PORT=${proxyPort}"
+                if (proxyUser) dcEnv << "DC_PROXY_USER=${proxyUser}"
+                if (proxyPass) dcEnv << "DC_PROXY_PASS=${proxyPass}"
 
-            proxyFlags = """
-                --proxyserver "\$DC_PROXY_HOST" \
-                --proxyport "\$DC_PROXY_PORT" \
-                \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \
-                \${DC_PROXY_PASS:+--proxypass "\$DC_PROXY_PASS"}
-            """.stripIndent().trim()
-        } else {
-            echo "[WARN] Could not parse proxy URL for Dependency-Check."
+                proxyFlags = """
+                    --proxyserver "\$DC_PROXY_HOST" \
+                    --proxyport "\$DC_PROXY_PORT" \
+                    \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \
+                    \${DC_PROXY_PASS:+--proxypass "\$DC_PROXY_PASS"}
+                """.stripIndent().trim()
+            } else {
+                echo "[WARN] Could not parse proxy URL for Dependency-Check."
+            }
+
+            // Some analyzers still honor HTTP(S)_PROXY
+            dcEnv.addAll(proxyEnv)
         }
-        // Some analyzers still honor HTTP(S)_PROXY
-        dcEnv.addAll(proxyEnv)
-    }
 
-    // Ensure output dir exists
-    sh "mkdir -p 'dependency-check-report'"
+        // Ensure output dir exists
+        sh "mkdir -p 'dependency-check-report'"
 
-    // NVD API key (highly recommended)
-    List creds = []
-    if (nvdApiKeyCredId) {
-        creds << string(credentialsId: nvdApiKeyCredId, variable: 'NVD_API_KEY')
-    }
-    if (nvdApiKey && !nvdApiKeyCredId) {
-        dcEnv << "NVD_API_KEY=${nvdApiKey}"
-    }
+        // NVD API key (recommended)
+        List creds = []
+        if (nvdApiKeyCredId) {
+            creds << string(credentialsId: nvdApiKeyCredId, variable: 'NVD_API_KEY')
+        }
+        if (nvdApiKey && !nvdApiKeyCredId) {
+            dcEnv << "NVD_API_KEY=${nvdApiKey}"
+        }
 
-    // Timeouts
-    int updateTimeoutMin = (cfg.dcUpdateTimeoutMinutes ?: 5)  as int  // short, just to refresh feeds
-    int scanTimeoutMin   = (cfg.dcScanTimeoutMinutes   ?: 10) as int  // your 10 min (or adjust)
+        String dcBase = """
+            /usr/share/dependency-check/bin/dependency-check.sh \\
+                --data /usr/share/dependency-check/data \\
+                --enableExperimental \\
+                ${proxyFlags} \\
+                \${NVD_API_KEY:+--nvdApiKey "\$NVD_API_KEY"}
+        """.stripIndent().trim()
 
-    // Build base command segments (quiet logging)
-    String dcBase = """
-        /usr/share/dependency-check/bin/dependency-check.sh \\
-            --data /usr/share/dependency-check/data \\
-            --enableExperimental \\
-            ${proxyFlags} \\
-            \${NVD_API_KEY:+--nvdApiKey "\$NVD_API_KEY"}
-    """.stripIndent().trim()
+        def insideArgs = "${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data"
 
-    // We'll run two phases: update-only (with tight timeout), then scan with --noupdate.
-    def insideArgs = "${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data"
-
-    def runUpdateOnly = {
-        docker.image(depCheckImage).inside(insideArgs) {
-            timeout(time: updateTimeoutMin, unit: 'MINUTES') {
-                sh """
-                  set +x
-                  set -eu
-                  ${dcBase} --updateonly
-                """
+        def runUpdateOnly = {
+            docker.image(depCheckImage).inside(insideArgs) {
+                timeout(time: dcUpdateTimeoutMin, unit: 'MINUTES') {
+                    sh "set +x\nset -eu\n${dcBase} --updateonly"
+                }
             }
         }
-    }
 
-    def runScanNoUpdate = {
-        docker.image(depCheckImage).inside(insideArgs) {
-            timeout(time: scanTimeoutMin, unit: 'MINUTES') {
-                sh """
-                  set +x
-                  set -eu
-                  ${dcBase} \\
-                    --scan . \\
-                    --format ALL \\
-                    --out dependency-check-report \\
-                    --noupdate
-                """
-                // Ensure readable by Jenkins and publishers
-                sh "chmod -R a+rX dependency-check-report || true"
+        def runScanNoUpdate = {
+            docker.image(depCheckImage).inside(insideArgs) {
+                timeout(time: dcScanTimeoutMin, unit: 'MINUTES') {
+                    sh """
+                        set +x
+                        set -eu
+                        ${dcBase} \\
+                          --scan . \\
+                          --format ALL \\
+                          --out dependency-check-report \\
+                          --noupdate
+                    """
+                    sh "chmod -R a+rX dependency-check-report || true"
+                }
             }
         }
-    }
 
-    try {
-        // Prefer credentials if provided
-        if (!creds.isEmpty()) {
-            withCredentials(creds) {
-                withEnv(dcEnv) {
-                    // 1) Try quick update
-                    try {
-                        runUpdateOnly()
-                    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) {
-                        echo "[WARN] DC update timed out after ${updateTimeoutMin} min; proceeding with --noupdate scan."
-                    } catch (Exception ue) {
-                        echo "[WARN] DC update failed: ${ue.message}; proceeding with --noupdate scan."
+        try {
+            if (!creds.isEmpty()) {
+                withCredentials(creds) {
+                    withEnv(dcEnv) {
+                        try { runUpdateOnly() }
+                        catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out; continuing with --noupdate." }
+                        catch (Exception ue) { echo "[WARN] DC update failed: ${ue.message}; continuing with --noupdate." }
+                        runScanNoUpdate()
                     }
-                    // 2) Run scan without update (fast, deterministic)
+                }
+            } else {
+                withEnv(dcEnv) {
+                    try { runUpdateOnly() }
+                    catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out; continuing with --noupdate." }
+                    catch (Exception ue) { echo "[WARN] DC update failed: ${ue.message}; continuing with --noupdate." }
                     runScanNoUpdate()
                 }
             }
-        } else {
-            withEnv(dcEnv) {
-                try {
-                    runUpdateOnly()
-                } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) {
-                    echo "[WARN] DC update timed out after ${updateTimeoutMin} min; proceeding with --noupdate scan."
-                } catch (Exception ue) {
-                    echo "[WARN] DC update failed: ${ue.message}; proceeding with --noupdate scan."
-                }
-                runScanNoUpdate()
-            }
+        } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException ie) {
+            echo "[WARN] Dependency-Check interrupted: ${ie.getMessage()}"
+        } catch (Exception e) {
+            echo "[WARN] Dependency-Check failed: ${e.message}"
+        } finally {
+            publishHTML([
+                reportDir  : 'dependency-check-report',
+                reportFiles: 'dependency-check-report.html',
+                reportName : 'OWASP Dependency Check'
+            ])
+            archiveArtifacts artifacts: 'dependency-check-report/**', allowEmptyArchive: true
         }
-    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException ie) {
-        echo "[WARN] Dependency-Check interrupted: ${ie.getMessage()}"
-    } catch (Exception e) {
-        echo "[WARN] Dependency-Check failed: ${e.message}"
-    } finally {
-        publishHTML([
-            reportDir  : 'dependency-check-report',
-            reportFiles: 'dependency-check-report.html',
-            reportName : 'OWASP Dependency Check'
-        ])
-        archiveArtifacts artifacts: 'dependency-check-report/**', allowEmptyArchive: true
     }
-}
 
     echo "=== Security Scan completed ==="
 }
