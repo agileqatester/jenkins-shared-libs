@@ -21,7 +21,7 @@ pipeline {
             label 'built-in' // ensure we run on Built‑In Node
             image 'agileqa/jenkins-agent:multi-tool'
             // host network (corp DNS), host docker socket, docker group GID (replace 991)
-            args  "--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add ${DOCKER_GID}"
+            args  '--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add ${DOCKER_GID}'
             reuseNode true
         }
     }
@@ -120,7 +120,7 @@ pipeline {
                     // Caches & inner docker args
                     npmCacheHost    = "${env.WORKSPACE}/.npm"
                     sh "mkdir -p '${npmCacheHost}'"
-                    innerDockerArgs = "--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add ${DOCKER_GID} -v ${npmCacheHost}:/home/node/.npm"
+                    innerDockerArgs = '--network host -v /var/run/docker.sock:/var/run/docker.sock --group-add ${DOCKER_GID} -v ${npmCacheHost}:/home/node/.npm'
 
                     sh '''
                       set -eu
