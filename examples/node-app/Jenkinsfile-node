@@ -179,51 +179,65 @@ pipeline {
             }
         }
 
-stage('Docker Build & Push') {
+        stage('Docker Build & Push') {
             steps {
                 script {
-                    // Check VPN status to decide proxy usage
-                    def onVPN = sh(script: 'ping -c 1 proxy 2>/dev/null', returnStatus: true) == 0
+                    // Detect VPN by resolving your corp proxy/DNS host (adjust 'proxy' if needed)
+                    // Using 'getent hosts' is fast and less noisy than ping; fallback to ping if not available.
+                    int vpnStatus = sh(
+                        script: 'getent hosts proxy >/dev/null 2>&1 || ping -c 1 -W 1 proxy >/dev/null 2>&1',
+                        returnStatus: true
+                    )
+                    boolean onVPN = (vpnStatus == 0)
+
                     echo "=== Docker Build Stage ==="
                     echo "VPN Status: ${onVPN ? 'CONNECTED' : 'DISCONNECTED'}"
-                    
+
+                    // Ensure proxyEnv is a List<String> like ["HTTP_PROXY=http://...","NO_PROXY=..."]
+                    List<String> proxyEnvList = (proxyEnv instanceof List) ? proxyEnv : []
+
                     if (onVPN) {
                         echo "On VPN - Using proxy for Docker operations"
-                        withEnv(proxyEnv) {
+                        withEnv(proxyEnvList + ["DOCKER_BUILDKIT=${params.USE_BUILDKIT ? '1' : '0'}"]) {
                             sh '''#!/bin/sh
-                            set -eu
-                            echo "Pulling with proxy settings..."
-                            docker pull node:20-alpine || true
+                                set -eu
+                                echo "Pulling with proxy settings..."
+                                docker pull node:20-alpine || true
                             '''
                             dockerBuildPush(
-                                image       : repo,
-                                tag         : tag,
-                                dockerfile  : dockerfile,
-                                context     : buildCtx,
-                                useBuildx   : false,
-                                useBuildKit : params.USE_BUILDKIT,
-                                proxyEnv    : proxyEnv
+                                image        : repo,
+                                tag          : tag,
+                                dockerfile   : dockerfile,
+                                context      : buildCtx,
+                                useBuildx    : false,
+                                useBuildKit  : params.USE_BUILDKIT,
+                                proxyEnv     : proxyEnvList,         // pass through
+                                allowHostNetwork: true,              // keep if you rely on host DNS
+                                credentialsId: 'docker-hub-agileqa'
                             )
                         }
                     } else {
                         echo "Off VPN - Pulling without proxy"
-                        sh '''#!/bin/sh
-                        set -eu
-                        # Explicitly unset all proxy variables for Docker operations
-                        unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
-                        echo "Pulling without proxy..."
-                        docker pull node:20-alpine || true
-                        '''
-                        // Pass empty proxy env to build function
-                        dockerBuildPush(
-                            image       : repo,
-                            tag         : tag,
-                            dockerfile  : dockerfile,
-                            context     : buildCtx,
-                            useBuildx   : false,
-                            useBuildKit : params.USE_BUILDKIT,
-                            proxyEnv    : [:]  // Empty map = no proxy
-                        )
+                        withEnv(["DOCKER_BUILDKIT=${params.USE_BUILDKIT ? '1' : '0'}"]) {
+                            sh '''#!/bin/sh
+                                set -eu
+                                # Explicitly unset all proxy variables for Docker operations
+                                unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+                                echo "Pulling without proxy..."
+                                docker pull node:20-alpine || true
+                            '''
+                            dockerBuildPush(
+                                image        : repo,
+                                tag          : tag,
+                                dockerfile   : dockerfile,
+                                context      : buildCtx,
+                                useBuildx    : false,
+                                useBuildKit  : params.USE_BUILDKIT,
+                                proxyEnv     : [],                    // empty list = no proxy inside step
+                                allowHostNetwork: true,
+                                credentialsId: 'docker-hub-agileqa'
+                            )
+                        }
                     }
                 }
             }
