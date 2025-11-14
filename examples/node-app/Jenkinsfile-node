@@ -192,6 +192,7 @@ pipeline {
                         // onVPN          : true/false (optional manual override)
                         // nvdApiKeyCredId: 'nvd-api-key' (optional)
                         debug             : true,
+                        dcUpdateRetryMinutes    : 3,
                         trivyTimeoutMinutes: 5,
                         dcUpdateTimeoutMinutes: 5,
                         dcScanTimeoutMinutes  : 10
