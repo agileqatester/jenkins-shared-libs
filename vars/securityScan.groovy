@@ -9,15 +9,15 @@ def call(Map cfg = [:]) {
     String trivyImage       = (cfg.trivyImage ?: 'aquasec/trivy:latest').trim()
     String depCheckImage    = (cfg.depCheckImage ?: 'owasp/dependency-check:latest').trim()
 
-    // Optional NVD API key:
-    // - cfg.nvdApiKey: string value (not recommended in plain text)
-    // - cfg.nvdApiKeyCredId: Jenkins Secret Text credentials ID (recommended)
+    // NVD API key (recommended):
+    //  - Prefer Jenkins Secret Text via nvdApiKeyCredId (e.g., 'nvd-api-key')
+    //  - Or pass plain text nvdApiKey (not recommended)
     String nvdApiKey        = (cfg.nvdApiKey ?: '').trim()
     String nvdApiKeyCredId  = (cfg.nvdApiKeyCredId ?: '').trim()
 
     // Optional override for VPN/proxy detection
-    // - cfg.onVPN: Boolean (true/false) to force proxy behavior
     Boolean onVPNOverride   = (cfg.containsKey('onVPN') ? (cfg.onVPN as Boolean) : null)
+
     String workspaceDir     = env.WORKSPACE ?: '.'
 
     echo "=== Security Scan Stage ==="
@@ -44,9 +44,10 @@ def call(Map cfg = [:]) {
     String dcData     = "${workspaceDir}/.cache/dependency-check"
     sh "mkdir -p '${trivyCache}' '${dcData}'"
 
-    String hostArgs = "--network host"
+    // Use host networking + host DNS resolv.conf in scanner containers
+    String hostArgs = "--network host -v /etc/resolv.conf:/etc/resolv.conf:ro"
 
-    // --- Parse proxyEnv (don't echo secrets) ---
+    // --- Parse proxyEnv (do not echo secrets) ---
     Map pe = proxyEnv.collectEntries { e ->
         int i = e.indexOf('=')
         (i > 0) ? [(e.substring(0, i)) : e.substring(i + 1)] : [:]
@@ -61,7 +62,6 @@ def call(Map cfg = [:]) {
     try {
         if (onVPN) {
             echo "Trivy: online with proxy"
-            // Disable mirror + (optionally) force GHCR for DB
             List<String> trivyEnv = (proxyEnv ?: []) + [
                 'TRIVY_DISABLE_MIRROR=1',
                 'TRIVY_DB_REPOSITORY=ghcr.io/aquasec/trivy-db:2',
@@ -70,6 +70,7 @@ def call(Map cfg = [:]) {
             withEnv(trivyEnv) {
                 docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
                     sh """
+                        set +x
                         set -eu
                         trivy image --severity HIGH,CRITICAL \
                             --exit-code ${failOnHigh ? '1' : '0'} \
@@ -82,15 +83,14 @@ def call(Map cfg = [:]) {
             echo "Trivy: offline (no proxy) — using cached DB if present"
             docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
                 sh """
+                    set +x
                     set -eu
                     if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
-                      echo "Using cached DB"
                       trivy image --skip-db-update --severity HIGH,CRITICAL \
                           --exit-code ${failOnHigh ? '1' : '0'} \
                           --format json --output trivy-report.json \
                           ${image}:${tag}
                     else
-                      echo "No cached DB found; running best-effort offline scan (won't fail build)"
                       trivy image --skip-db-update --severity HIGH,CRITICAL \
                           --exit-code 0 \
                           --format json --output trivy-report.json \
@@ -112,10 +112,16 @@ def call(Map cfg = [:]) {
     if (checkDeps) {
         echo "Dependency-Check: ${onVPN ? 'online with proxy' : 'offline/no-proxy'}"
 
-        // Build proxy flags for DC explicitly; also pass creds via env
+        // Resolve current Jenkins UID:GID so outputs are owned by Jenkins (not root)
+        def uid = sh(script: 'id -u', returnStdout: true).trim()
+        def gid = sh(script: 'id -g', returnStdout: true).trim()
+        String userArg = "--user ${uid}:${gid}"
+
+        // Build proxy flags; avoid echoing values by using env vars and set +x
         String proxyUrl = (httpsProxy ?: httpProxy)
-        String proxyFlags = ''
         List<String> dcEnv = []
+        String proxyFlags = ''
+
         if (onVPN && proxyUrl) {
             def m = (proxyUrl =~ /^(https?:)\\/\\/(?:([^:@]+)(?::([^@]*))?@)?([^:\\/]+)(?::(\\d+))?.*$/)
             if (m.matches()) {
@@ -124,26 +130,29 @@ def call(Map cfg = [:]) {
                 String proxyUser = m[0][2] ?: ''
                 String proxyPass = m[0][3] ?: ''
 
-                proxyFlags = "--proxyserver ${proxyHost} --proxyport ${proxyPort}"
-                if (proxyUser) {
-                    dcEnv << "DC_PROXY_USER=${proxyUser}"
-                    proxyFlags += " --proxyuser \"\\\$DC_PROXY_USER\""
-                }
-                if (proxyPass) {
-                    dcEnv << "DC_PROXY_PASS=${proxyPass}"
-                    proxyFlags += " --proxypass \"\\\$DC_PROXY_PASS\""
-                }
+                if (proxyHost) dcEnv << "DC_PROXY_HOST=${proxyHost}"
+                if (proxyPort) dcEnv << "DC_PROXY_PORT=${proxyPort}"
+                if (proxyUser) dcEnv << "DC_PROXY_USER=${proxyUser}"
+                if (proxyPass) dcEnv << "DC_PROXY_PASS=${proxyPass}"
+
+                proxyFlags = """
+                    --proxyserver "\$DC_PROXY_HOST" \
+                    --proxyport "\$DC_PROXY_PORT" \
+                    \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \
+                    \${DC_PROXY_PASS:+--proxypass "\$DC_PROXY_PASS"}
+                """.stripIndent().trim()
             } else {
                 echo "[WARN] Could not parse proxy URL for Dependency-Check."
             }
-            // Some code paths still honor HTTP(S)_PROXY
+
+            // Some analyzers still honor HTTP(S)_PROXY
             dcEnv.addAll(proxyEnv)
         }
 
         // Output dir must exist
         sh "mkdir -p 'dependency-check-report'"
 
-        // Optional NVD API key
+        // NVD API key (highly recommended; without it, first update is slow)
         List creds = []
         if (nvdApiKeyCredId) {
             creds << string(credentialsId: nvdApiKeyCredId, variable: 'NVD_API_KEY')
@@ -152,30 +161,39 @@ def call(Map cfg = [:]) {
             dcEnv << "NVD_API_KEY=${nvdApiKey}"
         }
 
-        String dcArgs = """
+        // Allow configuring a timeout to prevent “hangs” due to NVD throttling
+        int dcTimeoutMinutes = (cfg.dcTimeoutMinutes ?: 15) as int
+
+        // Build the command (with quiet logging)
+        String dcCmd = """
             /usr/share/dependency-check/bin/dependency-check.sh \\
                 --scan . \\
                 --format ALL \\
                 --out dependency-check-report \\
                 --data /usr/share/dependency-check/data \\
+                --enableExperimental \\
                 ${proxyFlags} \\
                 \${NVD_API_KEY:+--nvdApiKey "\$NVD_API_KEY"}
         """.stripIndent().trim()
 
         def runDC = {
-            docker.image(depCheckImage).inside("${hostArgs} --entrypoint='' -v ${dcData}:/usr/share/dependency-check/data") {
-                sh "set -eu\n${dcArgs}"
+            docker.image(depCheckImage).inside("${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data") {
+                timeout(time: dcTimeoutMinutes, unit: 'MINUTES') {
+                    sh "set +x\nset -eu\n${dcCmd}"
+                    // Ensure readable by Jenkins and publishers
+                    sh "chmod -R a+rX dependency-check-report || true"
+                }
             }
         }
 
         try {
             if (!creds.isEmpty()) {
-                withCredentials(creds) {
-                    withEnv(dcEnv) { runDC() }
-                }
+                withCredentials(creds) { withEnv(dcEnv) { runDC() } }
             } else {
                 withEnv(dcEnv) { runDC() }
             }
+        } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException ie) {
+            echo "[WARN] Dependency-Check interrupted: ${ie.getMessage()}"
         } catch (Exception e) {
             echo "[WARN] Dependency-Check failed: ${e.message}"
         } finally {

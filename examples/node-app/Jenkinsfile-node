@@ -149,6 +149,7 @@ pipeline {
                         proxyEnv          : proxyEnv  // your collected proxy env list
                         // onVPN          : true/false (optional manual override)
                         // nvdApiKeyCredId: 'nvd-api-key' (optional)
+                        dcTimeoutMinutes  : 10
                     )
 
             }
