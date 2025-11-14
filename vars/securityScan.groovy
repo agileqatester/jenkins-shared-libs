@@ -10,22 +10,25 @@ def call(Map cfg = [:]) {
     String trivyImage       = (cfg.trivyImage ?: 'aquasec/trivy:latest').trim()
     String depCheckImage    = (cfg.depCheckImage ?: 'owasp/dependency-check:latest').trim()
 
-    // Optional NVD key for Dependency-Check (highly recommended)
+    // Optional: NVD API key for Dependency-Check
     String nvdApiKey        = (cfg.nvdApiKey ?: '').trim()
     String nvdApiKeyCredId  = (cfg.nvdApiKeyCredId ?: '').trim()
 
-    // VPN override
+    // Optional: Override VPN decision
     Boolean onVPNOverride   = (cfg.containsKey('onVPN') ? (cfg.onVPN as Boolean) : null)
 
-    // NEW: Optional explicit DNS servers to use in containers, e.g., ['10.10.0.2','10.10.0.3']
+    // Optional: force DNS servers inside scanner containers (BEST if you know them)
     List<String> dnsServers = (cfg.dnsServers instanceof List) ? (cfg.dnsServers as List<String>) : []
 
-    // NEW: Hostnames to hard-pin via --add-host. Default includes ghcr.io for Trivy DB.
+    // Optional: hostnames to hard-pin (add /etc/hosts entries in scanners)
     List<String> extraHosts = (cfg.extraHosts instanceof List) ? (cfg.extraHosts as List<String>) : ['ghcr.io']
 
-    // Timeouts for DC
+    // Timeouts
+    int trivyTimeoutMin     = (cfg.trivyTimeoutMinutes ?: 5)  as int
     int dcUpdateTimeoutMin  = (cfg.dcUpdateTimeoutMinutes ?: 5)  as int
     int dcScanTimeoutMin    = (cfg.dcScanTimeoutMinutes   ?: 10) as int
+
+    boolean debug           = (cfg.debug != null) ? (cfg.debug as boolean) : false
 
     String workspaceDir     = env.WORKSPACE ?: '.'
 
@@ -33,8 +36,11 @@ def call(Map cfg = [:]) {
     echo "Image: ${image}:${tag}"
     echo "Fail on HIGH+: ${failOnHigh}"
     echo "Dependency-Check: ${checkDeps ? 'enabled' : 'disabled'}"
+    if (debug) {
+        echo "Debug: ENABLED"
+    }
 
-    // --- VPN / proxy detection ---
+    // --- VPN detection ---
     boolean onVPN
     if (onVPNOverride != null) {
         onVPN = onVPNOverride
@@ -62,16 +68,13 @@ def call(Map cfg = [:]) {
     String httpsProxy = (pe['HTTPS_PROXY'] ?: pe['https_proxy'] ?: httpProxy).trim()
     String noProxy    = (pe['NO_PROXY']    ?: pe['no_proxy']    ?: '').trim()
 
-    // ----------------------------------------------------
-    // DNS strategy for scanner containers
-    // ----------------------------------------------------
-    // 1) Build --dns args from cfg.dnsServers if provided (best).
+    // --- DNS build: --dns, mount resolv.conf, and --add-host (for ghcr.io etc.) ---
     String dnsArgs = ''
     if (dnsServers && !dnsServers.isEmpty()) {
         dnsArgs = dnsServers.collect { ns -> "--dns ${ns}" }.join(' ')
     }
 
-    // 2) Mount a resolv.conf file (best-effort; not relied upon)
+    // Select a resolv.conf to mount (best-effort)
     String dnsMount = sh(script: '''
         set -eu
         if [ -s /run/systemd/resolve/resolv.conf ]; then
@@ -84,8 +87,7 @@ def call(Map cfg = [:]) {
     ''', returnStdout: true).trim()
     String resolvMountArg = "-v ${dnsMount}:/etc/resolv.conf:ro"
 
-    // 3) Hard-pin certain hostnames via --add-host <name>:<ip> (e.g., ghcr.io)
-    //    We resolve IPs *before* starting the scanner containers.
+    // Resolve extraHosts on HOST prior to starting containers
     List<String> addHostArgsList = []
     extraHosts.each { h ->
         String ip = sh(script: """
@@ -94,14 +96,34 @@ def call(Map cfg = [:]) {
         """, returnStdout: true).trim()
         if (ip) {
             addHostArgsList << "--add-host ${h}:${ip}"
-        } else {
-            echo "[WARN] Could not resolve ${h} on the agent; not adding --add-host."
+        } else if (debug) {
+            echo "[DEBUG] Could not resolve ${h} on host; skipping --add-host."
         }
     }
     String addHostsArgs = addHostArgsList.join(' ')
 
-    // Base args for docker.inside() in scanners
     String hostArgs = "--network host ${resolvMountArg} ${dnsArgs} ${addHostsArgs}".trim()
+
+    if (debug) {
+        // Host-level diagnostics
+        echo "=== HOST Networking Debug ==="
+        sh '''
+            set +x
+            set -eu
+            echo "--- /etc/resolv.conf ---"
+            (cat /etc/resolv.conf || true) | sed 's/127\\.0\\.0\\.53/<stub>/g'
+            if command -v resolvectl >/dev/null 2>&1; then
+              echo "--- resolvectl dns ---"
+              resolvectl dns || true
+            fi
+            echo "--- getent hosts ghcr.io ---"
+            getent hosts ghcr.io || true
+        '''
+        echo "hostArgs: ${hostArgs}"
+        if (dnsServers) echo "dnsServers: ${dnsServers}"
+        if (addHostsArgs) echo "addHostsArgs: ${addHostsArgs}"
+        echo "dnsMount: ${dnsMount}"
+    }
 
     // ----------------------------------------------------
     // TRIVY
@@ -114,17 +136,41 @@ def call(Map cfg = [:]) {
                 'TRIVY_DB_REPOSITORY=ghcr.io/aquasec/trivy-db:2',
                 'TRIVY_TIMEOUT=5m'
             ]
+
+            // Optional preflight network probe using Alpine (for debug)
+            if (debug) {
+                docker.image('alpine:3').inside("${hostArgs} --entrypoint=''") {
+                    withEnv(proxyEnv ?: []) {
+                        sh '''
+                            set +x
+                            set -eu
+                            echo "=== Alpine probe inside container ==="
+                            echo "--- /etc/resolv.conf ---"
+                            (cat /etc/resolv.conf || true) | sed 's/127\\.0\\.0\\.53/<stub>/g'
+                            echo "--- getent hosts ghcr.io ---"
+                            getent hosts ghcr.io || true
+                            echo "--- wget --spider https://ghcr.io/v2/ (with proxy if set) ---"
+                            wget -T 5 -S --spider https://ghcr.io/v2/ 2>&1 || true
+                        '''
+                    }
+                }
+            }
+
             withEnv(trivyEnv) {
                 docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
-                    sh """
-                        set +x
-                        set -eu
-                        getent hosts ghcr.io >/dev/null 2>&1 || true
-                        trivy image --severity HIGH,CRITICAL \
-                            --exit-code ${failOnHigh ? '1' : '0'} \
-                            --format json --output trivy-report.json \
-                            ${image}:${tag}
-                    """
+                    timeout(time: trivyTimeoutMin, unit: 'MINUTES') {
+                        sh """
+                            set +x
+                            set -eu
+                            getent hosts ghcr.io >/dev/null 2>&1 || true
+                            trivy --version || true
+                            # Add --debug to increase verbosity
+                            trivy --debug image --severity HIGH,CRITICAL \\
+                                --exit-code ${failOnHigh ? '1' : '0'} \\
+                                --format json --output trivy-report.json \\
+                                ${image}:${tag}
+                        """
+                    }
                 }
             }
         } else {
@@ -134,19 +180,38 @@ def call(Map cfg = [:]) {
                     set +x
                     set -eu
                     if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
-                      trivy image --skip-db-update --severity HIGH,CRITICAL \
-                          --exit-code ${failOnHigh ? '1' : '0'} \
-                          --format json --output trivy-report.json \
+                      trivy image --skip-db-update --severity HIGH,CRITICAL \\
+                          --exit-code ${failOnHigh ? '1' : '0'} \\
+                          --format json --output trivy-report.json \\
                           ${image}:${tag}
                     else
-                      trivy image --skip-db-update --severity HIGH,CRITICAL \
-                          --exit-code 0 \
-                          --format json --output trivy-report.json \
+                      trivy image --skip-db-update --severity HIGH,CRITICAL \\
+                          --exit-code 0 \\
+                          --format json --output trivy-report.json \\
                           ${image}:${tag} || true
                     fi
                 """
             }
         }
+    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) {
+        echo "[WARN] Trivy timed out after ${trivyTimeoutMin} min; attempting offline fallback if cache exists."
+        // Try offline fallback so stage produces an artifact for downstreams
+        try {
+            docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
+                sh """
+                    set +x
+                    set -eu
+                    if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
+                      trivy image --skip-db-update --severity HIGH,CRITICAL \\
+                          --exit-code 0 \\
+                          --format json --output trivy-report.json \\
+                          ${image}:${tag} || true
+                    else
+                      echo '{"error":"trivy timed out and no cached DB"}' > trivy-report.json
+                    fi
+                """
+            }
+        } catch (Exception ignore) { /* ignore */ }
     } catch (Exception e) {
         echo "[WARN] Trivy failed: ${e.message}"
         writeFile file: 'trivy-report.json', text: '{"error":"trivy failed"}'
@@ -160,12 +225,10 @@ def call(Map cfg = [:]) {
     if (checkDeps) {
         echo "Dependency-Check: ${onVPN ? 'online with proxy' : 'offline/no-proxy'}"
 
-        // Run container as Jenkins UID:GID so output is readable/publishable
         def uid = sh(script: 'id -u', returnStdout: true).trim()
         def gid = sh(script: 'id -g', returnStdout: true).trim()
         String userArg = "--user ${uid}:${gid}"
 
-        // Proxy flags/env (avoid echoing values)
         String proxyUrl = (httpsProxy ?: httpProxy)
         List<String> dcEnv = []
         String proxyFlags = ''
@@ -184,23 +247,19 @@ def call(Map cfg = [:]) {
                 if (proxyPass) dcEnv << "DC_PROXY_PASS=${proxyPass}"
 
                 proxyFlags = """
-                    --proxyserver "\$DC_PROXY_HOST" \
-                    --proxyport "\$DC_PROXY_PORT" \
-                    \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \
+                    --proxyserver "\$DC_PROXY_HOST" \\
+                    --proxyport "\$DC_PROXY_PORT" \\
+                    \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \\
                     \${DC_PROXY_PASS:+--proxypass "\$DC_PROXY_PASS"}
                 """.stripIndent().trim()
             } else {
                 echo "[WARN] Could not parse proxy URL for Dependency-Check."
             }
-
-            // Some analyzers still honor HTTP(S)_PROXY
-            dcEnv.addAll(proxyEnv)
+            dcEnv.addAll(proxyEnv) // also pass HTTP(S)_PROXY
         }
 
-        // Ensure output dir exists
         sh "mkdir -p 'dependency-check-report'"
 
-        // NVD API key (recommended)
         List creds = []
         if (nvdApiKeyCredId) {
             creds << string(credentialsId: nvdApiKeyCredId, variable: 'NVD_API_KEY')
@@ -217,7 +276,7 @@ def call(Map cfg = [:]) {
                 \${NVD_API_KEY:+--nvdApiKey "\$NVD_API_KEY"}
         """.stripIndent().trim()
 
-        def insideArgs = "${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data"
+        String insideArgs = "${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data"
 
         def runUpdateOnly = {
             docker.image(depCheckImage).inside(insideArgs) {
@@ -248,16 +307,22 @@ def call(Map cfg = [:]) {
             if (!creds.isEmpty()) {
                 withCredentials(creds) {
                     withEnv(dcEnv) {
+                        if (debug) {
+                            echo "DC insideArgs: ${insideArgs}"
+                        }
                         try { runUpdateOnly() }
-                        catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out; continuing with --noupdate." }
+                        catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out (${dcUpdateTimeoutMin}m); continuing with --noupdate." }
                         catch (Exception ue) { echo "[WARN] DC update failed: ${ue.message}; continuing with --noupdate." }
                         runScanNoUpdate()
                     }
                 }
             } else {
                 withEnv(dcEnv) {
+                    if (debug) {
+                        echo "DC insideArgs: ${insideArgs}"
+                    }
                     try { runUpdateOnly() }
-                    catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out; continuing with --noupdate." }
+                    catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) { echo "[WARN] DC update timed out (${dcUpdateTimeoutMin}m); continuing with --noupdate." }
                     catch (Exception ue) { echo "[WARN] DC update failed: ${ue.message}; continuing with --noupdate." }
                     runScanNoUpdate()
                 }
