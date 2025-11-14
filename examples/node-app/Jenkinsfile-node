@@ -42,6 +42,54 @@ pipeline {
     // No global proxy environment here—inject only where needed via withEnv(proxyEnv)
 
     stages {
+        stage('Setup') {
+            steps {
+                script {
+                    echo "=== Proxy Configuration Check ==="
+                    
+                    // Test if on VPN
+                    def onVPN = sh(script: 'ping -c 1 proxy 2>/dev/null', returnStatus: true) == 0
+                    
+                    echo "VPN Status: ${onVPN ? 'CONNECTED' : 'DISCONNECTED'}"
+                    
+                    if (!onVPN) {
+                        echo "Off VPN - Disabling proxy for Git"
+                        env.GIT_CONFIG_PARAMETERS = "'http.proxy=' 'https.proxy='"
+                    } else {
+                        echo "On VPN - Using corporate proxy"
+                    }
+                    
+                    // Log current proxy settings
+                    echo "=== Environment Variables ==="
+                    sh '''
+                        echo "http_proxy: ${http_proxy:-not set}"
+                        echo "https_proxy: ${https_proxy:-not set}"
+                        echo "no_proxy: ${no_proxy:-not set}"
+                        echo "GIT_CONFIG_PARAMETERS: ${GIT_CONFIG_PARAMETERS:-not set}"
+                    '''
+                    
+                    // Log Git proxy configuration
+                    echo "=== Git Proxy Configuration ==="
+                    sh '''
+                        echo "Git http.proxy: $(git config --get http.proxy || echo 'not set')"
+                        echo "Git https.proxy: $(git config --get https.proxy || echo 'not set')"
+                    '''
+                    
+                    // Test connectivity
+                    echo "=== Connectivity Test ==="
+                    sh '''
+                        echo "Testing GitHub connectivity..."
+                        if curl -I --connect-timeout 5 https://github.com 2>&1 | head -n 1; then
+                            echo "✓ GitHub is reachable"
+                        else
+                            echo "✗ GitHub is NOT reachable"
+                        fi
+                    '''
+                }
+            }
+        }
+
+
         stage('Checkout') {
             steps { checkout scm }
         }
