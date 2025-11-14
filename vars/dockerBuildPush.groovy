@@ -1,4 +1,5 @@
 def call(Map cfg = [:]) {
+    try {
     String imageRepo     = cfg.image ?: (params?.IMAGE_NAME ?: '')
     if (!imageRepo) {
         error "[dockerBuildPush] image repo is required (cfg.image or params.IMAGE_NAME)"
@@ -43,9 +44,9 @@ def call(Map cfg = [:]) {
 
             // Login
             sh '''#!/bin/sh
-set -eu
-echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
-'''
+              set -eu
+              echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin >/dev/null
+              '''
 
 if (useBuildx) {
     // Driver opts: pass only HTTP/HTTPS proxy; do NOT pass env.no_proxy (commas break k=v)
@@ -73,60 +74,64 @@ if (useBuildx) {
     String hostNet   = "--allow=network.host --network=host"
 
     sh """#!/bin/sh
-set -eu
-DOCKER_BUILDX_BUILDER=jxbuilder \\
-docker buildx build --builder jxbuilder --progress=plain --load \\
-  ${hostNet} \\
-  ${secretStr} \\
-  ${proxyStr} \\
-  -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-"""
+      set -eu
+      DOCKER_BUILDX_BUILDER=jxbuilder \\
+      docker buildx build --builder jxbuilder --progress=plain --load \\
+        ${hostNet} \\
+        ${secretStr} \\
+        ${proxyStr} \\
+        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+      """
 } else {
     // Classic docker build (daemon must be proxy/DNS configured or pre-pull the base image)
     String secretStr = (secretFlags ? secretFlags.join(' ') : '')
     String proxyStr  = proxyArgs.join(' ')
     sh """#!/bin/sh
-set -eu
-echo "[WARN] Classic 'docker build' uses the Docker daemon for pulls. If the daemon isn't proxy/DNS-configured, pulls may fail."
-docker build --progress=plain \\
-  ${secretStr} \\
-  ${proxyStr} \\
-  -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-"""
+      set -eu
+      echo "[WARN] Classic 'docker build' uses the Docker daemon for pulls. If the daemon isn't proxy/DNS-configured, pulls may fail."
+      docker build --progress=plain \\
+        ${secretStr} \\
+        ${proxyStr} \\
+        -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
+      """
 }
 
             // Push tag
             sh """#!/bin/sh
-set -eu
-docker push ${imageRepo}:${tag}
-"""
+              set -eu
+              docker push ${imageRepo}:${tag}
+              """
 
             // Tag/push latest if needed
             if (tag != 'latest') {
                 sh """#!/bin/sh
-set -eu
-docker tag ${imageRepo}:${tag} ${imageRepo}:latest
-docker push ${imageRepo}:latest
-"""
+                  set -eu
+                  docker tag ${imageRepo}:${tag} ${imageRepo}:latest
+                  docker push ${imageRepo}:latest
+                  """
             }
 
             // History check (red flag if any proxy strings leaked)
             sh """#!/bin/sh
-set -eu
-docker history ${imageRepo}:${tag} --no-trunc | tee history.txt >/dev/null
-if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
-  echo 'ERROR: Proxy strings found in image history!' >&2
-  rm -f history.txt
-  exit 1
-fi
-rm -f history.txt
-"""
-
+              set -eu
+              docker history ${imageRepo}:${tag} --no-trunc | tee history.txt >/dev/null
+              if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
+                echo 'ERROR: Proxy strings found in image history!' >&2
+                rm -f history.txt
+                exit 1
+              fi
+              rm -f history.txt
+              """
+      } catch (Exception e) {
+              echo "[ERROR] dockerBuildPush failed: ${e.message}"
+              currentBuild.result = 'FAILURE'
+              throw e
+          } finally {
             // Logout
             sh '''#!/bin/sh
-set -eu
-docker logout >/dev/null 2>&1 || true
-'''
+                set -eu
+                docker logout >/dev/null 2>&1 || true
+                '''
         }
     }
 }

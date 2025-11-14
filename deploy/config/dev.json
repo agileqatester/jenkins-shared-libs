@@ -1,0 +1,6 @@
+{
+  "platform": "docker",
+  "appName": "node-sample",
+  "ports": "3000:80",
+  "healthPath": "/health"
+}

@@ -1,5 +1,9 @@
 @Library('jenkins-shared-library@main') _
 
+import org.agileqa.pipeline.ConfigDefaults
+
+int dockerGid = cfg.dockerGid ?: ConfigDefaults.DOCKER_GID as int
+
 def proxyEnv         = [:]
 def repo             = null
 def tag              = ''
@@ -8,6 +12,8 @@ def buildCtx         = projDir
 def dockerfile       = "${projDir}/Dockerfile"  // unambiguous path from workspace root
 def npmCacheHost     = ''
 def innerDockerArgs  = '' // for nested docker if you keep it
+
+
 
 pipeline {
     agent {
@@ -121,6 +127,18 @@ pipeline {
                       test -f '${dockerfile}'
                       head -n 5 '${dockerfile}'
                     """
+                }
+            }
+        }
+        stage('Security Scan') {
+            steps {
+                script {
+                    securityScan(
+                        image: repo,
+                        tag: tag,
+                        failOnHigh: true,
+                        checkDependencies: true
+                    )
                 }
             }
         }
