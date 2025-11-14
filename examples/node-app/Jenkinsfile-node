@@ -129,11 +129,11 @@ pipeline {
                       docker version
                     '''
 
-                    sh """
+                    sh '''
                       set -eu
                       test -f '${dockerfile}'
                       head -n 5 '${dockerfile}'
-                    """
+                    '''
                 }
             }
         }

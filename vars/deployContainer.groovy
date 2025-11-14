@@ -5,7 +5,7 @@ def call(Map cfg = [:]) {
     String healthPath    = cfg.healthPath ?: '/health'  // e.g., '/health' or '/'
 
     docker.image('agileqa/jenkins-agent:multi-tool').inside('--group-add 991 -v /var/run/docker.sock:/var/run/docker.sock --add-host=host.docker.internal:host-gateway') {
-        sh """
+        sh '''
           set -eux
           docker rm -f ${containerName} || true
           if [ -n "${ports}" ]; then
@@ -25,7 +25,7 @@ def call(Map cfg = [:]) {
             sleep 1
           done
           echo "APP_URL=\${APP_URL}" | tee app_url.properties
-        """
+        '''
     }
     archiveArtifacts artifacts: 'app_url.properties', fingerprint: true, onlyIfSuccessful: true
 }
