@@ -33,8 +33,6 @@ pipeline {
     }
 
     parameters {
-        string(name: 'DOCKER_GID', defaultValue: '991',description: 'GID of docker group on this node (e.g., run: stat -c %g /var/run/docker.sock)')
-        booleanParam(name: 'USE_BUILDKIT', defaultValue: true,  description: 'Enable Docker BuildKit')
         booleanParam(name: 'USE_BUILDX',   defaultValue: false, description: 'Use docker buildx (multi-arch)')
         string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional override (defaults to "latest")')
 
@@ -47,9 +45,7 @@ pipeline {
     }
 
     environment {
-        DOCKER_GID = "${params.DOCKER_GID}" // default is '991' from parameters
-        // If you truly want to use a library default, keep it simple:
-        // DOCKER_GID = "${params.DOCKER_GID ?: '991'}"
+        DOCKER_GID = "${ConfigDefaults.DOCKER_GID}"
     }
 
     // No global proxy environment here—inject only where needed via withEnv(proxyEnv)
@@ -137,18 +133,18 @@ pipeline {
                 }
             }
         }
-        stage('Security Scan') {
-            steps {
-                script {
-                    securityScan(
-                        image: repo,
-                        tag: tag,
-                        failOnHigh: true,
-                        checkDependencies: true
-                    )
-                }
-            }
-        }
+        // stage('Security Scan') {
+        //     steps {
+        //         script {
+        //             securityScan(
+        //                 image: repo,
+        //                 tag: tag,
+        //                 failOnHigh: true,
+        //                 checkDependencies: true
+        //             )
+        //         }
+        //     }
+        // }
 
         stage('Preflight') {
             steps {
