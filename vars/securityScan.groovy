@@ -310,36 +310,47 @@ def call(Map cfg = [:]) {
             echo "[WARN] DC update failed: ${ue.message}"
         }
 
-        // 2) Check if DB exists in the mounted cache (on the Jenkins side)
-        int hasDbStatus = sh(
-            script: """
-              set -eu
-              [ -d '${dcData}' ] && ls -1 '${dcData}' | grep -E '(^odc\\.(mv|h2)\\.db$|^nvdcve.*\\.json$|^dc\\..*\\.db$)' >/dev/null 2>&1
-            """,
+        // 2) Check if DB exists in the mounted cache (on the Jenkins side)       
+        
+        int hasDbStatus
+        withEnv(["DC_DATA=${dcData}"]) {
+        hasDbStatus = sh(
+            script: '''
+            set -eu
+            [ -d "$DC_DATA" ] && \
+            ls -1 "$DC_DATA" | grep -E '(^odc\.(mv|h2)\.db$|^nvdcve.*\.json$|^dc\..*\.db$)' >/dev/null 2>&1
+            ''',
             returnStatus: true
         )
-        dbReady = (hasDbStatus == 0)
+        }
+        boolean dbReady = (hasDbStatus == 0)
 
         // 3) If not ready and on VPN, do a second short retry
+
         if (!dbReady && onVPN) {
-            echo "[INFO] DC DB not found after first update; retrying for ${dcUpdateRetryMin}m..."
-            try {
-                if (!creds.isEmpty()) withCredentials(creds) { withEnv(dcEnv) { runUpdateOnlyWithTimeout(dcUpdateRetryMin) } }
-                else withEnv(dcEnv) { runUpdateOnlyWithTimeout(dcUpdateRetryMin) }
-            } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie2) {
-                echo "[WARN] DC update retry timed out (${dcUpdateRetryMin}m)."
-            } catch (Exception ue2) {
-                echo "[WARN] DC update retry failed: ${ue2.message}"
-            }
-            hasDbStatus = sh(
-                script: """
-                  set -eu
-                  [ -d '${dcData}' ] && ls -1 '${dcData}' | grep -E '(^odc\\.(mv|h2)\\.db$|^nvdcve.*\\.json$|^dc\\..*\\.db$)' >/dev/null 2>&1
-                """,
-                returnStatus: true
-            )
-            dbReady = (hasDbStatus == 0)
+        echo "[INFO] DC DB not found after first update; retrying for ${dcUpdateRetryMin}m..."
+        try {
+            if (!creds.isEmpty()) withCredentials(creds) { withEnv(dcEnv) { runUpdateOnlyWithTimeout(dcUpdateRetryMin) } }
+            else withEnv(dcEnv) { runUpdateOnlyWithTimeout(dcUpdateRetryMin) }
+        } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie2) {
+            echo "[WARN] DC update retry timed out (${dcUpdateRetryMin}m)."
+        } catch (Exception ue2) {
+            echo "[WARN] DC update retry failed: ${ue2.message}"
         }
+
+        withEnv(["DC_DATA=${dcData}"]) {
+            hasDbStatus = sh(
+            script: '''
+                set -eu
+                [ -d "$DC_DATA" ] && \
+                ls -1 "$DC_DATA" | grep -E '(^odc\.(mv|h2)\.db$|^nvdcve.*\.json$|^dc\..*\.db$)' >/dev/null 2>&1
+            ''',
+            returnStatus: true
+            )
+        }
+        dbReady = (hasDbStatus == 0)
+        }
+
 
         if (!dbReady) {
             // 4) Graceful skip with an informative HTML
