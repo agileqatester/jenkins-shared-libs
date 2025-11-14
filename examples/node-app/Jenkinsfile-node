@@ -24,6 +24,7 @@ pipeline {
         skipDefaultCheckout(true)
         timestamps()
         ansiColor('xterm')
+        skipDefaultCheckout(true)  // Prevent automatic checkout
     }
 
     parameters {
