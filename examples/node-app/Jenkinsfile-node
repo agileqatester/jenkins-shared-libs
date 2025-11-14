@@ -137,18 +137,21 @@ pipeline {
                 }
             }
         }
-        // stage('Security Scan') {
-        //     steps {
-        //         script {
-        //             securityScan(
-        //                 image: repo,
-        //                 tag: tag,
-        //                 failOnHigh: true,
-        //                 checkDependencies: true
-        //             )
-        //         }
-        //     }
-        // }
+        
+        stage('Security Scan') {
+        steps {
+            script {
+            securityScan(
+                image            : repo,
+                tag              : tag,
+                failOnHigh       : true,
+                checkDependencies: true,
+                proxyEnv         : proxyEnv // pass your collected proxy env list here
+            )
+            }
+        }
+        }
+
 
         stage('Preflight') {
             steps {
