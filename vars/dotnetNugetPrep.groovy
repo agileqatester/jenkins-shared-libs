@@ -33,21 +33,21 @@ def call(Map cfg = [:]) {
     }
 
     // Ensure host-side dirs exist before we enter the container
-    sh '''
+    sh """
       set -eux
       mkdir -p '${nugetHomeHost}/NuGet' '${nugetHomeHost}/packages'
-    '''
+    """
 
     // Run a short root session INSIDE the build image with the same dockerArgs
     // to fix ownership of the mounted directory.
     docker.image(image).inside("--user 0 ${dockerArgs}") {
-        sh '''
+        sh """
           set -eux
           # Make sure container path exists (the mount should create it, but just in case)
           mkdir -p '${nugetHomeContainer}/NuGet' '${nugetHomeContainer}/packages'
           chown -R ${uid}:${gid} '${nugetHomeContainer}'
           ls -ld '${nugetHomeContainer}' '${nugetHomeContainer}/NuGet' '${nugetHomeContainer}/packages'
-        '''
+        """
     }
 
     echo "[dotnetNugetPrep] NuGet home prepared at host '${nugetHomeHost}' " +

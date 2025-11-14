@@ -67,7 +67,7 @@ def call(Map cfg = [:]) {
     // Tries getent -> nslookup -> DoH (Cloudflare then Google) via curl/wget; uses HTTPS_PROXY if provided.
     def resolveHostViaDoH = { String host ->
         String exportProxy = (proxyEnv ?: []).collect { kv -> "export ${kv};" }.join(' ')
-        String script = '''
+        String script = """
             set -eu
             H="${host}"
             ip=\$(getent hosts "$H" 2>/dev/null | awk 'NR==1{print \$1}') || true
@@ -91,7 +91,7 @@ def call(Map cfg = [:]) {
               [ -n "\$ip" ] && { echo "\$ip"; exit 0; }
             fi
             echo ""
-        '''.stripIndent()
+        """.stripIndent()
         return sh(script: script, returnStdout: true).trim()
     }
 
@@ -175,7 +175,7 @@ def call(Map cfg = [:]) {
             withEnv(trivyEnv) {
                 docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
                     timeout(time: trivyTimeoutMin, unit: 'MINUTES') {
-                        sh '''
+                        sh """
                             set +x
                             set -eu
                             trivy --version || true
@@ -183,14 +183,14 @@ def call(Map cfg = [:]) {
                                 --exit-code ${failOnHigh ? '1' : '0'} \\
                                 --format json --output trivy-report.json \\
                                 ${image}:${tag}
-                        '''
+                        """
                     }
                 }
             }
         } else {
             echo "Trivy: offline (no proxy) — use cached DB if present"
             docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
-                sh '''
+                sh """
                     set +x
                     set -eu
                     if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
@@ -204,14 +204,14 @@ def call(Map cfg = [:]) {
                           --format json --output trivy-report.json \\
                           ${image}:${tag} || true
                     fi
-                '''
+                """
             }
         }
     } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException tie) {
         echo "[WARN] Trivy timed out after ${trivyTimeoutMin}m; trying offline fallback if cache exists."
         try {
             docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
-                sh '''
+                sh """
                     set +x
                     set -eu
                     if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
@@ -222,7 +222,7 @@ def call(Map cfg = [:]) {
                     else
                       echo '{"error":"trivy timed out and no cached DB"}' > trivy-report.json
                     fi
-                '''
+                """
             }
         } catch (Exception ignore) { /* ignore */ }
     } catch (Exception e) {
@@ -257,12 +257,12 @@ def call(Map cfg = [:]) {
                 if (proxyPort) dcEnv << "DC_PROXY_PORT=${proxyPort}"
                 if (proxyUser) dcEnv << "DC_PROXY_USER=${proxyUser}"
                 if (proxyPass) dcEnv << "DC_PROXY_PASS=${proxyPass}"
-                proxyFlags = '''
+                proxyFlags = """
                     --proxyserver "\$DC_PROXY_HOST" \\
                     --proxyport "\$DC_PROXY_PORT" \\
                     \${DC_PROXY_USER:+--proxyuser "\$DC_PROXY_USER"} \\
                     \${DC_PROXY_PASS:+--proxypass "\$DC_PROXY_PASS"}
-                '''.stripIndent().trim()
+                """.stripIndent().trim()
             } else {
                 echo "[WARN] Could not parse proxy URL for Dependency-Check."
             }
@@ -281,13 +281,13 @@ def call(Map cfg = [:]) {
             dcEnv << "NVD_API_KEY=${nvdApiKey}"
         }
 
-        String dcBase = '''
+        String dcBase = """
             /usr/share/dependency-check/bin/dependency-check.sh \\
                 --data /usr/share/dependency-check/data \\
                 --enableExperimental \\
                 ${proxyFlags} \\
                 \${NVD_API_KEY:+--nvdApiKey "\$NVD_API_KEY"}
-        '''.stripIndent().trim()
+        """.stripIndent().trim()
 
         String insideArgs = "${hostArgs} --entrypoint='' ${userArg} -v ${dcData}:/usr/share/dependency-check/data"
 
@@ -312,10 +312,10 @@ def call(Map cfg = [:]) {
 
         // 2) Check if DB exists in the mounted cache (on the Jenkins side)
         int hasDbStatus = sh(
-            script: '''
+            script: """
               set -eu
               [ -d '${dcData}' ] && ls -1 '${dcData}' | grep -E '(^odc\\.(mv|h2)\\.db$|^nvdcve.*\\.json$|^dc\\..*\\.db$)' >/dev/null 2>&1
-            ''',
+            """,
             returnStatus: true
         )
         dbReady = (hasDbStatus == 0)
@@ -332,10 +332,10 @@ def call(Map cfg = [:]) {
                 echo "[WARN] DC update retry failed: ${ue2.message}"
             }
             hasDbStatus = sh(
-                script: '''
+                script: """
                   set -eu
                   [ -d '${dcData}' ] && ls -1 '${dcData}' | grep -E '(^odc\\.(mv|h2)\\.db$|^nvdcve.*\\.json$|^dc\\..*\\.db$)' >/dev/null 2>&1
-                ''',
+                """,
                 returnStatus: true
             )
             dbReady = (hasDbStatus == 0)
@@ -344,7 +344,7 @@ def call(Map cfg = [:]) {
         if (!dbReady) {
             // 4) Graceful skip with an informative HTML
             echo "[WARN] Skipping Dependency-Check scan: DB cache not available (offline or update timed out)."
-            sh '''
+            sh """
               set -eu
               mkdir -p dependency-check-report
               cat > dependency-check-report/dependency-check-report.html <<'HTML'
@@ -359,13 +359,13 @@ def call(Map cfg = [:]) {
                 </ul>
               </body></html>
               HTML
-            '''
+            """
         } else {
             // 5) Run the scan quickly with --noupdate (DB present)
             def runScanNoUpdate = {
                 docker.image(depCheckImage).inside(insideArgs) {
                     timeout(time: dcScanTimeoutMin, unit: 'MINUTES') {
-                        sh '''
+                        sh """
                             set +x
                             set -eu
                             ${dcBase} \\
@@ -373,7 +373,7 @@ def call(Map cfg = [:]) {
                               --format ALL \\
                               --out dependency-check-report \\
                               --noupdate
-                        '''
+                        """
                         sh "chmod -R a+rX dependency-check-report || true"
                     }
                 }
@@ -386,11 +386,11 @@ def call(Map cfg = [:]) {
             } catch (Exception e) {
                 echo "[WARN] Dependency-Check failed: ${e.message}"
                 // Ensure there is at least a placeholder to publish
-                sh '''
+                sh """
                   set -eu
                   mkdir -p dependency-check-report
                   echo '<html><body><h3>Dependency-Check failed</h3></body></html>' > dependency-check-report/dependency-check-report.html
-                '''
+                """
             }
         }
 

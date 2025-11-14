@@ -10,7 +10,7 @@ def call(Map cfg = [:]) {
         return v.replaceAll(/(https?:\/\/)([^:@\/]+:)?([^@\/]+@)?/, '$1****:****@')
     }
 
-    def script = '''#!/bin/sh
+    def script = """#!/bin/sh
                 set -eu
                 echo "=== Preflight ==="
                 whoami; id
@@ -54,7 +54,7 @@ def call(Map cfg = [:]) {
                 curl -sS -I --max-time 20 https://registry.npmjs.org | head -n1 || true
 
                 echo "=== Preflight OK (or diagnostics above) ==="
-                '''
+                """
 
     if (inside && image) {
         docker.image(image).inside(dockerArgs) { dir(workDir) { sh script } }

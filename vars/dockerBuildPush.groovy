@@ -57,7 +57,7 @@ def call(Map cfg = [:]) {
                     driverOptParts << "--driver-opt" << "network=host"
                     String driverOptsStr = driverOptParts.join(' ')
 
-                    sh '''#!/bin/sh
+                    sh """#!/bin/sh
                         set -eu
                         (docker buildx ls | grep -q '^${builderName}[[:space:]]') && docker buildx rm ${builderName} >/dev/null 2>&1 || true
                         docker buildx create --name ${builderName} --driver docker-container \\
@@ -66,13 +66,13 @@ def call(Map cfg = [:]) {
                         docker buildx inspect --bootstrap >/dev/null
                         echo "=== buildx ls ==="
                         docker buildx ls
-                    '''
+                    """
 
                     String secretStr = (secretFlags ? secretFlags.join(' ') : '')
                     String proxyStr  = proxyArgs.join(' ')
                     String hostNet   = allowHostNet ? "--allow=network.host --network=host" : ""
 
-                    sh '''#!/bin/sh
+                    sh """#!/bin/sh
                         set -eu
                         DOCKER_BUILDX_BUILDER=${builderName} \\
                         docker buildx build --builder ${builderName} --progress=plain --load \\
@@ -80,38 +80,38 @@ def call(Map cfg = [:]) {
                           ${secretStr} \\
                           ${proxyStr} \\
                           -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-                    '''
+                    """
                 } else {
                     // Classic docker build (daemon must be proxy/DNS configured or pre-pull the base image)
                     String secretStr = (secretFlags ? secretFlags.join(' ') : '')
                     String proxyStr  = proxyArgs.join(' ')
-                    sh '''#!/bin/sh
+                    sh """#!/bin/sh
                         set -eu
                         echo "[WARN] Classic 'docker build' uses the Docker daemon for pulls. If the daemon isn't proxy/DNS-configured, pulls may fail."
                         docker build --progress=plain \\
                           ${secretStr} \\
                           ${proxyStr} \\
                           -t ${imageRepo}:${tag} -f ${dockerfile} ${context}
-                    '''
+                    """
                 }
 
                 // Push tag
-                sh '''#!/bin/sh
+                sh """#!/bin/sh
                     set -eu
                     docker push ${imageRepo}:${tag}
-                '''
+                """
 
                 // Tag/push latest if needed
                 if (tag != 'latest') {
-                    sh '''#!/bin/sh
+                    sh """#!/bin/sh
                         set -eu
                         docker tag ${imageRepo}:${tag} ${imageRepo}:latest
                         docker push ${imageRepo}:latest
-                    '''
+                    """
                 }
 
                 // History check (red flag if any proxy strings leaked)
-                sh '''#!/bin/sh
+                sh """#!/bin/sh
                     set -eu
                     docker history ${imageRepo}:${tag} --no-trunc | tee history.txt >/dev/null
                     if grep -Eiq '(http_proxy|https_proxy|genproxy|amdocs)' history.txt; then
@@ -120,7 +120,7 @@ def call(Map cfg = [:]) {
                       exit 1
                     fi
                     rm -f history.txt
-                '''
+                """
             } // withEnv
         } // withCredentials
 
