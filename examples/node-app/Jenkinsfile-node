@@ -146,7 +146,7 @@ pipeline {
                         tag               : tag,
                         failOnHigh        : true,
                         checkDependencies : true,
-                        proxyEnv          : proxyEnv  // your collected proxy env list
+                        proxyEnv          : proxyEnv,  // your collected proxy env list
                         // onVPN          : true/false (optional manual override)
                         // nvdApiKeyCredId: 'nvd-api-key' (optional)
                         dcTimeoutMinutes  : 10
