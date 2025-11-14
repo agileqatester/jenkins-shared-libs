@@ -18,7 +18,6 @@ def call(Map cfg = [:]) {
     // Optional override for VPN/proxy detection
     // - cfg.onVPN: Boolean (true/false) to force proxy behavior
     Boolean onVPNOverride   = (cfg.containsKey('onVPN') ? (cfg.onVPN as Boolean) : null)
-
     String workspaceDir     = env.WORKSPACE ?: '.'
 
     echo "=== Security Scan Stage ==="
@@ -40,15 +39,14 @@ def call(Map cfg = [:]) {
         echo "VPN Status (auto): ${onVPN ? 'CONNECTED' : 'DISCONNECTED'}"
     }
 
-    // --- Paths / caches ---
+    // --- Caches & paths ---
     String trivyCache = "${workspaceDir}/.cache/trivy"
     String dcData     = "${workspaceDir}/.cache/dependency-check"
     sh "mkdir -p '${trivyCache}' '${dcData}'"
 
-    // For Docker Pipeline inside() args
     String hostArgs = "--network host"
 
-    // --- Parse proxyEnv to a map (do NOT echo secrets) ---
+    // --- Parse proxyEnv (don't echo secrets) ---
     Map pe = proxyEnv.collectEntries { e ->
         int i = e.indexOf('=')
         (i > 0) ? [(e.substring(0, i)) : e.substring(i + 1)] : [:]
@@ -57,12 +55,18 @@ def call(Map cfg = [:]) {
     String httpsProxy = (pe['HTTPS_PROXY'] ?: pe['https_proxy'] ?: httpProxy).trim()
     String noProxy    = (pe['NO_PROXY']    ?: pe['no_proxy']    ?: '').trim()
 
-    // --- TRIVY ---
+    // ----------------------------------------------------
+    // TRIVY
+    // ----------------------------------------------------
     try {
         if (onVPN) {
             echo "Trivy: online with proxy"
-            // Add BuildKit var only if you want; harmless here but included by convention
-            def trivyEnv = (proxyEnv ?: []) + ["TRIVY_TIMEOUT=5m"]
+            // Disable mirror + (optionally) force GHCR for DB
+            List<String> trivyEnv = (proxyEnv ?: []) + [
+                'TRIVY_DISABLE_MIRROR=1',
+                'TRIVY_DB_REPOSITORY=ghcr.io/aquasec/trivy-db:2',
+                'TRIVY_TIMEOUT=5m'
+            ]
             withEnv(trivyEnv) {
                 docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
                     sh """
@@ -77,7 +81,6 @@ def call(Map cfg = [:]) {
         } else {
             echo "Trivy: offline (no proxy) — using cached DB if present"
             docker.image(trivyImage).inside("${hostArgs} --entrypoint='' -v ${trivyCache}:/root/.cache") {
-                // Try offline with cache; if no cache, run best-effort and do not fail the build
                 sh """
                     set -eu
                     if [ -f /root/.cache/trivy/db/trivy.db ] || [ -d /root/.cache/trivy/db ]; then
@@ -87,7 +90,7 @@ def call(Map cfg = [:]) {
                           --format json --output trivy-report.json \
                           ${image}:${tag}
                     else
-                      echo "No cached DB found; running best-effort offline scan (will not fail the build)"
+                      echo "No cached DB found; running best-effort offline scan (won't fail build)"
                       trivy image --skip-db-update --severity HIGH,CRITICAL \
                           --exit-code 0 \
                           --format json --output trivy-report.json \
@@ -98,26 +101,21 @@ def call(Map cfg = [:]) {
         }
     } catch (Exception e) {
         echo "[WARN] Trivy failed: ${e.message}"
-        // Ensure we still archive a file (even empty) so downstream always finds something
         writeFile file: 'trivy-report.json', text: '{"error":"trivy failed"}'
-        if (failOnHigh) {
-            // We only fail the stage here if failOnHigh is intended to gate; otherwise continue
-            // but this is a tooling failure, not findings; so we do not hard-fail here.
-        }
     } finally {
         archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
     }
 
-    // --- OWASP Dependency-Check ---
+    // ----------------------------------------------------
+    // OWASP DEPENDENCY-CHECK
+    // ----------------------------------------------------
     if (checkDeps) {
         echo "Dependency-Check: ${onVPN ? 'online with proxy' : 'offline/no-proxy'}"
 
-        // Build proxy flags for Dependency-Check explicitly; it doesn't always honor HTTP_PROXY
-        // We avoid printing credentials in the command by passing them via env vars.
+        // Build proxy flags for DC explicitly; also pass creds via env
         String proxyUrl = (httpsProxy ?: httpProxy)
         String proxyFlags = ''
         List<String> dcEnv = []
-
         if (onVPN && proxyUrl) {
             def m = (proxyUrl =~ /^(https?:)\\/\\/(?:([^:@]+)(?::([^@]*))?@)?([^:\\/]+)(?::(\\d+))?.*$/)
             if (m.matches()) {
@@ -127,7 +125,6 @@ def call(Map cfg = [:]) {
                 String proxyPass = m[0][3] ?: ''
 
                 proxyFlags = "--proxyserver ${proxyHost} --proxyport ${proxyPort}"
-
                 if (proxyUser) {
                     dcEnv << "DC_PROXY_USER=${proxyUser}"
                     proxyFlags += " --proxyuser \"\\\$DC_PROXY_USER\""
@@ -139,12 +136,14 @@ def call(Map cfg = [:]) {
             } else {
                 echo "[WARN] Could not parse proxy URL for Dependency-Check."
             }
-
-            // Pass through proxy env too (some paths still honor it)
+            // Some code paths still honor HTTP(S)_PROXY
             dcEnv.addAll(proxyEnv)
         }
 
-        // NVD API key handling (prefer credential)
+        // Output dir must exist
+        sh "mkdir -p 'dependency-check-report'"
+
+        // Optional NVD API key
         List creds = []
         if (nvdApiKeyCredId) {
             creds << string(credentialsId: nvdApiKeyCredId, variable: 'NVD_API_KEY')
@@ -172,20 +171,14 @@ def call(Map cfg = [:]) {
         try {
             if (!creds.isEmpty()) {
                 withCredentials(creds) {
-                    withEnv(dcEnv) {
-                        runDC()
-                    }
+                    withEnv(dcEnv) { runDC() }
                 }
             } else {
-                withEnv(dcEnv) {
-                    runDC()
-                }
+                withEnv(dcEnv) { runDC() }
             }
         } catch (Exception e) {
             echo "[WARN] Dependency-Check failed: ${e.message}"
-            // Do not fail the whole build on tooling failure; publish whatever exists
         } finally {
-            // Reports directory is produced by DC when it succeeds; tolerate absence.
             publishHTML([
                 reportDir  : 'dependency-check-report',
                 reportFiles: 'dependency-check-report.html',
